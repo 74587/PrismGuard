@@ -20,6 +20,22 @@ def can_parse_openai_chat(path: str, headers: Dict[str, str], body: Dict[str, An
     if "prompt" in body and "messages" not in body:
         return False
     
+    # 排斥带有 cache_control 的 Claude Chat 格式
+    if "messages" in body:
+        messages = body.get("messages", [])
+        if messages and isinstance(messages, list):
+            for msg in messages:
+                if isinstance(msg, dict):
+                    content = msg.get("content", [])
+                    if isinstance(content, list):
+                        # 检查是否有 cache_control 字段（Claude Chat Prompt Caching 特性）
+                        has_cache_control = any(
+                            isinstance(block, dict) and "cache_control" in block
+                            for block in content
+                        )
+                        if has_cache_control:
+                            return False
+    
     # 检查路径
     if "/chat/completions" in path:
         return True
