@@ -25,5 +25,6 @@ if [ ! -f ".env" ]; then
 fi
 
 # 使用 uv 运行（自动管理虚拟环境和依赖）
+# 注意：supervisor 需要进程在前台运行，所以不使用 --reload
 echo "启动 GuardianBridge..."
-$UV_CMD run uvicorn ai_proxy.app:app --host 0.0.0.0 --port 8000 --reload
+exec $UV_CMD run uvicorn ai_proxy.app:app --host 0.0.0.0 --port 8000
