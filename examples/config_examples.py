@@ -58,7 +58,8 @@ config_openai_to_claude = {
         "enabled": True,
         "from": "openai_chat",
         "to": "claude_chat",
-        "stream": "auto"
+        "stream": "auto",
+        "strict_parse": True  # 强制要求解析成功，失败则返回错误
     }
 }
 
@@ -118,6 +119,22 @@ config_full = {
             "by_header": True,
             "by_body": True
         }
+    }
+}
+
+# 示例 7: 严格解析模式（解析失败直接返回错误）
+config_strict_parse = {
+    "basic_moderation": {
+        "enabled": False
+    },
+    "smart_moderation": {
+        "enabled": False
+    },
+    "format_transform": {
+        "enabled": True,
+        "from": "openai_chat",  # 只接受 OpenAI 格式
+        "to": "openai_chat",
+        "strict_parse": True  # 如果不是 OpenAI 格式，直接返回错误
     }
 }
 
