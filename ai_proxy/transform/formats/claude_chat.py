@@ -15,44 +15,72 @@ from ai_proxy.transform.formats.internal_models import (
 
 
 def can_parse_claude_chat(path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
-    """判断是否为 Claude Chat 格式"""
-    # 排斥 Claude Code 格式：如果有 prompt 字段且没有 messages，则不是 Claude Chat
-    if "prompt" in body and "messages" not in body:
-        return False
+    """
+    判断是否为 Claude Chat 或 Claude Code 格式
+    """
+    # 1. 优先排斥 OpenAI Chat 格式
+    if "messages" in body and isinstance(body["messages"], list):
+        for msg in body["messages"]:
+            if isinstance(msg, dict) and msg.get("role") == "tool":
+                return False # 这是 OpenAI 的 role="tool"
     
-    # 排斥带有 role="tool" 的 OpenAI Chat 格式
-    # Claude Chat 不使用 role="tool"，而是使用 content 中的 tool_result type
-    if "messages" in body:
-        messages = body.get("messages", [])
-        if messages and isinstance(messages, list):
-            for msg in messages:
-                if isinstance(msg, dict) and msg.get("role") == "tool":
-                    return False
+    # 2. 检查 Claude Chat 的关键标识
+    if "/messages" in path or "anthropic-version" in headers:
+        return True
     
-    # 检查路径
-    if "/messages" in path:
+    # 3. 检查 Claude Chat 的 body 结构
+    if "messages" in body and isinstance(body["messages"], list):
         return True
-    # 检查 header
-    if "anthropic-version" in headers:
+        
+    # 4. 检查 Claude Code (Agent SDK) 的 body 结构
+    if "prompt" in body and isinstance(body.get("prompt"), str):
         return True
-    # 检查 body 结构
-    if "messages" in body:
-        messages = body.get("messages", [])
-        if messages and isinstance(messages, list):
-            first_msg = messages[0]
-            if isinstance(first_msg, dict):
-                content = first_msg.get("content", [])
-                if isinstance(content, list) and content:
-                    if isinstance(content[0], dict) and "type" in content[0]:
-                        return True
+        
     return False
 
 
-def from_claude_chat(body: Dict[str, Any]) -> InternalChatRequest:
-    """
-    Claude Chat 格式 -> 内部格式（支持工具调用）
-    """
-    # 解析工具定义
+def _from_claude_code(body: Dict[str, Any]) -> InternalChatRequest:
+    """从 Claude Code (Agent SDK) 格式转换"""
+    prompt = body.get("prompt", "")
+    options = body.get("options", {})
+    
+    messages = []
+    system_prompt = options.get("systemPrompt")
+    if system_prompt:
+        messages.append(InternalMessage(
+            role="system",
+            content=[InternalContentBlock(type="text", text=system_prompt)]
+        ))
+    
+    if isinstance(prompt, str):
+        messages.append(InternalMessage(
+            role="user",
+            content=[InternalContentBlock(type="text", text=prompt)]
+        ))
+    
+    tools = []
+    mcp_servers = options.get("mcpServers", {})
+    for server_name, server_config in mcp_servers.items():
+        server_tools = server_config.get("tools", [])
+        for tool_def in server_tools:
+            tools.append(InternalTool(
+                name=f"mcp__{server_name}__{tool_def.get('name', '')}",
+                description=tool_def.get("description"),
+                input_schema=tool_def.get("input_schema", {})
+            ))
+            
+    return InternalChatRequest(
+        messages=messages,
+        model=options.get("model", "claude-sonnet-4-5"),
+        stream=False,
+        tools=tools,
+        tool_choice=options.get("tool_choice"),
+        extra={k: v for k, v in options.items()
+               if k not in ["model", "systemPrompt", "mcpServers", "tool_choice"]}
+    )
+
+def _from_claude_chat(body: Dict[str, Any]) -> InternalChatRequest:
+    """从标准 Claude Chat 格式转换"""
     tools = []
     for t in body.get("tools", []):
         tools.append(InternalTool(
@@ -62,48 +90,51 @@ def from_claude_chat(body: Dict[str, Any]) -> InternalChatRequest:
         ))
     
     messages = []
+    system_content = body.get("system")
     
-    # 处理 system
-    system = body.get("system", "")
-    if system:
-        messages.append(InternalMessage(
-            role="system",
-            content=[InternalContentBlock(type="text", text=system)]
-        ))
+    if system_content:
+        system_text = ""
+        if isinstance(system_content, str):
+            system_text = system_content
+        elif isinstance(system_content, list):
+            # 处理 system 是内容块列表的情况
+            texts = []
+            for block in system_content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+            system_text = "\n".join(texts)
+        
+        if system_text:
+            messages.append(InternalMessage(
+                role="system",
+                content=[InternalContentBlock(type="text", text=system_text)]
+            ))
     
-    # 处理 messages
     for msg in body.get("messages", []):
         blocks = []
         content_parts = msg.get("content", [])
         
-        # 处理字符串内容
         if isinstance(content_parts, str):
             blocks.append(InternalContentBlock(type="text", text=content_parts))
         else:
-            # 处理数组内容
             for c in content_parts:
                 ctype = c.get("type", "")
-                
                 if ctype == "text":
                     blocks.append(InternalContentBlock(type="text", text=c.get("text", "")))
-                
                 elif ctype == "tool_use":
                     blocks.append(InternalContentBlock(
                         type="tool_call",
                         tool_call=InternalToolCall(
                             id=c.get("id", ""),
                             name=c.get("name", ""),
-                            arguments=c.get("input", {})
+                            arguments=c.get("input", {}) if isinstance(c.get("input"), dict) else {}
                         )
                     ))
-                
                 elif ctype == "tool_result":
                     output = c.get("content", "")
-                    # 如果 content 是列表，提取文本
                     if isinstance(output, list):
                         texts = [item.get("text", "") for item in output if item.get("type") == "text"]
                         output = "\n".join(texts)
-                    
                     blocks.append(InternalContentBlock(
                         type="tool_result",
                         tool_result=InternalToolResult(
@@ -125,9 +156,18 @@ def from_claude_chat(body: Dict[str, Any]) -> InternalChatRequest:
         stream=body.get("stream", False),
         tools=tools,
         tool_choice=body.get("tool_choice"),
-        extra={k: v for k, v in body.items() 
+        extra={k: v for k, v in body.items()
                if k not in ["system", "messages", "model", "stream", "tools", "tool_choice"]}
     )
+
+def from_claude_chat(body: Dict[str, Any]) -> InternalChatRequest:
+    """
+    Claude Chat / Code 格式 -> 内部格式
+    """
+    if "prompt" in body and "messages" not in body:
+        return _from_claude_code(body)
+    else:
+        return _from_claude_chat(body)
 
 
 def to_claude_chat(req: InternalChatRequest) -> Dict[str, Any]:

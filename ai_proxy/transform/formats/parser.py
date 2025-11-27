@@ -3,7 +3,7 @@
 """
 from typing import Dict, Any, Optional, Tuple, List, Protocol
 from ai_proxy.transform.formats.internal_models import InternalChatRequest, InternalChatResponse
-from ai_proxy.transform.formats import openai_chat, claude_chat, claude_code, openai_codex
+from ai_proxy.transform.formats import openai_chat, claude_chat, openai_codex
 
 
 class FormatParser(Protocol):
@@ -71,26 +71,6 @@ class ClaudeChatParser:
         return claude_chat.internal_to_claude_resp(resp)
 
 
-class ClaudeCodeParser:
-    """Claude Code (Agent SDK) 解析器"""
-    name = "claude_code"
-    
-    def can_parse(self, path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
-        return claude_code.can_parse_claude_code(path, headers, body)
-    
-    def from_format(self, body: Dict[str, Any]) -> InternalChatRequest:
-        return claude_code.from_claude_code(body)
-    
-    def to_format(self, req: InternalChatRequest) -> Dict[str, Any]:
-        return claude_code.to_claude_code(req)
-    
-    def resp_to_internal(self, resp: Dict[str, Any]) -> InternalChatResponse:
-        return claude_code.claude_code_resp_to_internal(resp)
-    
-    def internal_to_resp(self, resp: InternalChatResponse) -> Dict[str, Any]:
-        return claude_code.internal_to_claude_code_resp(resp)
-
-
 class OpenAICodexParser:
     """OpenAI Codex/Completions 解析器"""
     name = "openai_codex"
@@ -115,7 +95,6 @@ class OpenAICodexParser:
 PARSERS: Dict[str, FormatParser] = {
     "openai_chat": OpenAIChatParser(),
     "claude_chat": ClaudeChatParser(),
-    "claude_code": ClaudeCodeParser(),
     "openai_codex": OpenAICodexParser(),
 }
 
@@ -148,7 +127,7 @@ def detect_and_parse(
     # 1. 如果禁用工具，排除仅支持工具的格式
     if disable_tools:
         # Claude Code 和 OpenAI Codex 主要用于工具调用，应该被排除
-        tool_only_formats = ["claude_code", "openai_codex"]
+        tool_only_formats = ["openai_codex"]
     else:
         tool_only_formats = []
     

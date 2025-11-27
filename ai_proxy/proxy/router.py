@@ -1,6 +1,7 @@
 """
 主路由处理模块 - 支持多来源格式和工具调用
 """
+
 import json
 import urllib.parse
 from typing import Optional, Tuple
@@ -26,16 +27,17 @@ def parse_url_config(cfg_and_upstream: str) -> Tuple[dict, str]:
     parts = cfg_and_upstream.split("$", 1)
     if len(parts) != 2:
         raise HTTPException(400, "Invalid URL format: expected {config}${upstream}")
-    
+
     try:
         cfg_part = parts[0]
         upstream = parts[1]
-        
+
         # 检查是否使用环境变量
         if cfg_part.startswith("!"):
             # 从环境变量读取配置
             env_key = cfg_part[1:]  # 移除 ! 前缀
             from ai_proxy.config import settings
+
             config_str = getattr(settings, env_key, None)
             if not config_str:
                 raise HTTPException(400, f"Environment variable {env_key} not found")
@@ -44,7 +46,7 @@ def parse_url_config(cfg_and_upstream: str) -> Tuple[dict, str]:
             # URL编码的JSON配置
             cfg_str = urllib.parse.unquote(cfg_part)
             config = json.loads(cfg_str)
-        
+
         return config, upstream
     except HTTPException:
         raise
@@ -53,14 +55,11 @@ def parse_url_config(cfg_and_upstream: str) -> Tuple[dict, str]:
 
 
 async def process_request(
-    config: dict,
-    body: dict,
-    path: str,
-    headers: dict
+    config: dict, body: dict, path: str, headers: dict
 ) -> Tuple[bool, Optional[str], Optional[dict], Optional[str]]:
     """
     处理请求审核和格式转换
-    
+
     Returns:
         (通过, 错误信息, 转换后的body或错误详情, 源格式名称)
     """
@@ -68,46 +67,46 @@ async def process_request(
         return await _process_request_impl(config, body, path, headers)
     except Exception as e:
         import traceback
-        print(f"\n{'='*60}")
+
+        print(f"\n{'=' * 60}")
         print(f"[ERROR] Exception in process_request:")
         print(f"Exception type: {type(e).__name__}")
         print(f"Exception message: {e}")
         print(f"Traceback:")
         traceback.print_exc()
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
         raise
 
 
 async def _process_request_impl(
-    config: dict,
-    body: dict,
-    path: str,
-    headers: dict
+    config: dict, body: dict, path: str, headers: dict
 ) -> Tuple[bool, Optional[str], Optional[dict], Optional[str]]:
     """实际的请求处理逻辑"""
     print(f"\n[DEBUG] ========== 请求处理开始 ==========")
     print(f"  路径: {path}")
-    
+
     # 格式转换配置
     transform_cfg = config.get("format_transform", {})
     transform_enabled = transform_cfg.get("enabled", False)
-    
+
     print(f"  格式转换: {'启用' if transform_enabled else '禁用'}")
-    
+
     if not transform_enabled:
         # 不转换，直接审核原始 body
         from ai_proxy.transform.extractor import extract_text_for_moderation
+
         text = extract_text_for_moderation(body, "openai_chat")
-        
+
         print(f"  抽取文本长度: {len(text)} 字符")
-        
+
         # 基础审核
-        if config.get("basic_moderation", {}).get("enabled"):
-            passed, reason = basic_moderation(text, config["basic_moderation"])
+        basic_mod_cfg = config.get("basic_moderation", {})
+        if basic_mod_cfg.get("enabled", False):
+            passed, reason = basic_moderation(text, basic_mod_cfg)
             if not passed:
                 print(f"[DEBUG] ========== 请求被拒绝（基础审核） ==========\n")
                 return False, reason, None, None
-        
+
         # 智能审核
         if config.get("smart_moderation", {}).get("enabled"):
             passed, result = await smart_moderation(text, config["smart_moderation"])
@@ -118,7 +117,7 @@ async def _process_request_impl(
                     "source": result.source,  # ai / bow_model / cache
                     "reason": result.reason,
                     "category": result.category,
-                    "confidence": result.confidence
+                    "confidence": result.confidence,
                 }
                 error_msg = f"Smart moderation blocked by {result.source}"
                 if result.category:
@@ -126,29 +125,32 @@ async def _process_request_impl(
                 if result.confidence is not None:
                     error_msg += f" (confidence: {result.confidence:.3f})"
                 return False, error_msg, details, None
-        
+
         print(f"[DEBUG] ========== 请求通过审核 ==========\n")
         return True, None, body, None
-    
+
     # 检测并解析来源格式
     config_from = transform_cfg.get("from", "auto")
     strict_parse = transform_cfg.get("strict_parse", False)
     disable_tools = transform_cfg.get("disable_tools", False)
-    
+
     # 如果禁用工具且配置指定了 from，可能需要覆盖
     if disable_tools and config_from != "auto":
         # 警告：disable_tools 会覆盖 from 配置
         print(f"[INFO] disable_tools=true will override format_transform.from config")
-    
+
     src_format, internal_req, parse_error = detect_and_parse(
         config_from, path, headers, body, strict_parse, disable_tools
     )
-    
+
     if src_format is None:
         # 无法识别格式
         if strict_parse:
             # 严格模式：返回详细错误信息
-            error_msg = parse_error or f"Format parse error: Unable to parse request format (expected: {config_from})"
+            error_msg = (
+                parse_error
+                or f"Format parse error: Unable to parse request format (expected: {config_from})"
+            )
             print(f"[DEBUG] 严格解析模式：{error_msg}")
             print(f"[DEBUG] ========== 请求被拒绝（解析失败） ==========\n")
             return False, error_msg, None, None
@@ -157,20 +159,21 @@ async def _process_request_impl(
             print(f"[DEBUG] 无法识别格式，透传")
             print(f"[DEBUG] ========== 请求处理结束 ==========\n")
             return True, None, body, None
-    
+
     print(f"  检测到格式: {src_format}")
-    
+
     # 从内部格式抽取文本进行审核
     text = extract_text_from_internal(internal_req)
     print(f"  抽取文本长度: {len(text)} 字符")
-    
+
     # 基础审核
-    if config.get("basic_moderation", {}).get("enabled"):
-        passed, reason = basic_moderation(text, config["basic_moderation"])
+    basic_mod_cfg = config.get("basic_moderation", {})
+    if basic_mod_cfg.get("enabled", False):
+        passed, reason = basic_moderation(text, basic_mod_cfg)
         if not passed:
             print(f"[DEBUG] ========== 请求被拒绝（基础审核） ==========\n")
             return False, reason, None, src_format
-    
+
     # 智能审核
     if config.get("smart_moderation", {}).get("enabled"):
         passed, result = await smart_moderation(text, config["smart_moderation"])
@@ -181,7 +184,7 @@ async def _process_request_impl(
                 "source": result.source,
                 "reason": result.reason,
                 "category": result.category,
-                "confidence": result.confidence
+                "confidence": result.confidence,
             }
             error_msg = f"Smart moderation blocked by {result.source}"
             if result.category:
@@ -189,12 +192,12 @@ async def _process_request_impl(
             if result.confidence is not None:
                 error_msg += f" (confidence: {result.confidence:.3f})"
             return False, error_msg, details, src_format
-    
+
     # 格式转换
     target_format = transform_cfg.get("to", src_format)
-    
+
     print(f"  目标格式: {target_format}")
-    
+
     if target_format == src_format:
         # 目标格式与源格式相同，不转换
         print(f"  格式相同，无需转换")
@@ -213,7 +216,7 @@ async def _process_request_impl(
                 print(f"[DEBUG] 格式转换失败: {e}")
                 print(f"[DEBUG] ========== 请求处理失败 ==========\n")
                 return False, f"Format transform error: {str(e)}", None, src_format
-    
+
     print(f"[DEBUG] ========== 请求通过审核 ==========\n")
     return True, None, transformed_body, src_format
 
@@ -222,16 +225,17 @@ async def _process_request_impl(
 async def proxy_entry(cfg_and_upstream: str, request: Request):
     """
     代理入口 - 支持多来源格式检测和转换
-    
+
     URL 格式: /{url_encoded_config}${upstream_with_path}
     例如: /%7B...%7D$http://api.com/v1/chat/completions
     """
     # 解析配置，upstream_base 包含完整的上游 URL（含路径）
     try:
         config, upstream_full = parse_url_config(cfg_and_upstream)
-        
+
         # 从 upstream_full 中分离 base_url 和 path
         from urllib.parse import urlparse
+
         parsed = urlparse(upstream_full)
         upstream_base = f"{parsed.scheme}://{parsed.netloc}"
         upstream_path = parsed.path or "/"
@@ -242,47 +246,54 @@ async def proxy_entry(cfg_and_upstream: str, request: Request):
                 "error": {
                     "code": "CONFIG_PARSE_ERROR",
                     "message": e.detail,
-                    "type": "config_error"
+                    "type": "config_error",
                 }
-            }
+            },
         )
-    
+
     # 获取请求体
     try:
         body = await request.json() if request.method in ["POST", "PUT"] else {}
     except:
         body = {}
-    
+
     # 使用从 upstream_full 解析出的路径
     path = upstream_path
-    
+
+    print("[DEBUG]", body)
+
     # 处理审核和转换
     passed, error_msg, data, src_format = await process_request(
         config, body, path, dict(request.headers)
     )
-    
+
     if not passed:
         error_response = {
             "code": "MODERATION_BLOCKED",
             "message": error_msg,
             "type": "moderation_error",
-            "source_format": src_format
+            "source_format": src_format,
         }
         # 如果 data 是字典且包含审核详情，添加到响应中
         if isinstance(data, dict) and "source" in data:
             error_response["moderation_details"] = data
-        
-        return JSONResponse(
-            status_code=400,
-            content={"error": error_response}
-        )
-    
+
+        return JSONResponse(status_code=400, content={"error": error_response})
+
     # passed=True 时，data 是转换后的 body
     transformed_body = data
-    
+
     # 转发到上游
     upstream_client = UpstreamClient(upstream_base)
-    
+
+    # 检查是否需要响应转换
+    transform_cfg = config.get("format_transform", {})
+    need_response_transform = (
+        transform_cfg.get("enabled", False)
+        and src_format is not None
+        and src_format != transform_cfg.get("to", src_format)
+    )
+
     # 转发请求
     try:
         response = await upstream_client.forward_request(
@@ -290,25 +301,28 @@ async def proxy_entry(cfg_and_upstream: str, request: Request):
             path=path,
             headers=dict(request.headers),
             body=transformed_body if transformed_body else body,
-            is_stream=body.get("stream", False) if isinstance(body, dict) else False
+            is_stream=body.get("stream", False) if isinstance(body, dict) else False,
+            src_format=src_format if need_response_transform else None,
+            target_format=transform_cfg.get("to") if need_response_transform else None,
         )
         return response
     except Exception as e:
         import traceback
-        print(f"\n{'='*60}")
+
+        print(f"\n{'=' * 60}")
         print(f"[ERROR] Proxy exception in router:")
         print(f"Exception type: {type(e).__name__}")
         print(f"Exception message: {e}")
         print(f"Traceback:")
         traceback.print_exc()
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
         return JSONResponse(
             status_code=500,
             content={
                 "error": {
                     "code": "PROXY_ERROR",
                     "message": f"Proxy request failed: {str(e)}",
-                    "type": "proxy_error"
+                    "type": "proxy_error",
                 }
-            }
+            },
         )
