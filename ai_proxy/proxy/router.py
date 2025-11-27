@@ -133,15 +133,16 @@ async def _process_request_impl(
     # 检测并解析来源格式
     config_from = transform_cfg.get("from", "auto")
     strict_parse = transform_cfg.get("strict_parse", False)
-    src_format, internal_req = detect_and_parse(config_from, path, headers, body)
+    src_format, internal_req, parse_error = detect_and_parse(config_from, path, headers, body, strict_parse)
     
     if src_format is None:
         # 无法识别格式
         if strict_parse:
-            # 严格模式：解析失败直接返回错误
-            print(f"[DEBUG] 严格解析模式：无法识别格式")
+            # 严格模式：返回详细错误信息
+            error_msg = parse_error or f"Format parse error: Unable to parse request format (expected: {config_from})"
+            print(f"[DEBUG] 严格解析模式：{error_msg}")
             print(f"[DEBUG] ========== 请求被拒绝（解析失败） ==========\n")
-            return False, f"Format parse error: Unable to parse request format (expected: {config_from})", None, None
+            return False, error_msg, None, None
         else:
             # 非严格模式：透传
             print(f"[DEBUG] 无法识别格式，透传")

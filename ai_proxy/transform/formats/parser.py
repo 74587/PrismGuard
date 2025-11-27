@@ -3,7 +3,7 @@
 """
 from typing import Dict, Any, Optional, Tuple, List, Protocol
 from ai_proxy.transform.formats.internal_models import InternalChatRequest, InternalChatResponse
-from ai_proxy.transform.formats import openai_chat, claude_chat
+from ai_proxy.transform.formats import openai_chat, claude_chat, claude_code, openai_codex
 
 
 class FormatParser(Protocol):
@@ -71,10 +71,52 @@ class ClaudeChatParser:
         return claude_chat.internal_to_claude_resp(resp)
 
 
+class ClaudeCodeParser:
+    """Claude Code (Agent SDK) 解析器"""
+    name = "claude_code"
+    
+    def can_parse(self, path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
+        return claude_code.can_parse_claude_code(path, headers, body)
+    
+    def from_format(self, body: Dict[str, Any]) -> InternalChatRequest:
+        return claude_code.from_claude_code(body)
+    
+    def to_format(self, req: InternalChatRequest) -> Dict[str, Any]:
+        return claude_code.to_claude_code(req)
+    
+    def resp_to_internal(self, resp: Dict[str, Any]) -> InternalChatResponse:
+        return claude_code.claude_code_resp_to_internal(resp)
+    
+    def internal_to_resp(self, resp: InternalChatResponse) -> Dict[str, Any]:
+        return claude_code.internal_to_claude_code_resp(resp)
+
+
+class OpenAICodexParser:
+    """OpenAI Codex/Completions 解析器"""
+    name = "openai_codex"
+    
+    def can_parse(self, path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
+        return openai_codex.can_parse_openai_codex(path, headers, body)
+    
+    def from_format(self, body: Dict[str, Any]) -> InternalChatRequest:
+        return openai_codex.from_openai_codex(body)
+    
+    def to_format(self, req: InternalChatRequest) -> Dict[str, Any]:
+        return openai_codex.to_openai_codex(req)
+    
+    def resp_to_internal(self, resp: Dict[str, Any]) -> InternalChatResponse:
+        return openai_codex.openai_codex_resp_to_internal(resp)
+    
+    def internal_to_resp(self, resp: InternalChatResponse) -> Dict[str, Any]:
+        return openai_codex.internal_to_openai_codex_resp(resp)
+
+
 # 注册所有解析器
 PARSERS: Dict[str, FormatParser] = {
     "openai_chat": OpenAIChatParser(),
     "claude_chat": ClaudeChatParser(),
+    "claude_code": ClaudeCodeParser(),
+    "openai_codex": OpenAICodexParser(),
 }
 
 
@@ -82,8 +124,9 @@ def detect_and_parse(
     config_from: Any,
     path: str,
     headers: Dict[str, str],
-    body: Dict[str, Any]
-) -> Tuple[Optional[str], Optional[InternalChatRequest]]:
+    body: Dict[str, Any],
+    strict_parse: bool = False
+) -> Tuple[Optional[str], Optional[InternalChatRequest], Optional[str]]:
     """
     检测并解析请求格式
     
@@ -95,9 +138,10 @@ def detect_and_parse(
         path: 请求路径
         headers: 请求头
         body: 请求体
+        strict_parse: 是否启用严格解析模式
     
     Returns:
-        (格式名称, 内部请求对象) 或 (None, None) 表示无法识别
+        (格式名称, 内部请求对象, 错误消息) 或 (None, None, 错误消息) 表示无法识别
     """
     # 1. 确定候选格式列表
     if config_from == "auto":
@@ -118,14 +162,52 @@ def detect_and_parse(
         try:
             if parser.can_parse(path, headers, body):
                 internal = parser.from_format(body)
-                return name, internal
+                return name, internal, None
         except Exception as e:
             # 解析失败，继续尝试下一个
             print(f"[WARN] Failed to parse as {name}: {e}")
             continue
     
-    # 3. 都不识别，返回 None
-    return None, None
+    # 3. 都不识别
+    if strict_parse:
+        # 严格模式：检查是否有其他格式可以解析
+        all_formats = list(PARSERS.keys())
+        excluded_formats = [f for f in all_formats if f not in candidates]
+        
+        # 遍历被排除的格式，看是否有可以解析的
+        detectable_formats = []
+        for name in excluded_formats:
+            parser = PARSERS.get(name)
+            if parser is None:
+                continue
+            
+            try:
+                if parser.can_parse(path, headers, body):
+                    detectable_formats.append(name)
+            except Exception:
+                continue
+        
+        if detectable_formats:
+            # 发现有可以解析但被排除的格式
+            expected_str = f"'{config_from}'" if isinstance(config_from, str) else str(candidates)
+            detected_str = ", ".join(f"'{f}'" for f in detectable_formats)
+            error_msg = (
+                f"Format mismatch: Request appears to be in format [{detected_str}], "
+                f"but only [{expected_str}] is allowed. "
+                f"Please check your 'from' configuration or update it to include the detected format."
+            )
+            return None, None, error_msg
+        else:
+            # 没有任何格式可以解析
+            expected_str = f"'{config_from}'" if isinstance(config_from, str) else str(candidates)
+            error_msg = (
+                f"Unable to parse request format. Expected format: {expected_str}. "
+                f"Please verify your request body structure matches the expected format."
+            )
+            return None, None, error_msg
+    
+    # 非严格模式：返回 None 表示无法识别（将透传）
+    return None, None, None
 
 
 def get_parser(format_name: str) -> Optional[FormatParser]:

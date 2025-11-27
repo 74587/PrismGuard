@@ -16,6 +16,10 @@ from ai_proxy.transform.formats.internal_models import (
 
 def can_parse_openai_chat(path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
     """判断是否为 OpenAI Chat 格式"""
+    # 排斥 OpenAI Codex/Completions 格式：如果有 prompt 字段且路径不含 /chat，则不是 Chat
+    if "prompt" in body and "messages" not in body:
+        return False
+    
     # 检查路径
     if "/chat/completions" in path:
         return True

@@ -16,6 +16,10 @@ from ai_proxy.transform.formats.internal_models import (
 
 def can_parse_claude_chat(path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
     """判断是否为 Claude Chat 格式"""
+    # 排斥 Claude Code 格式：如果有 prompt 字段且没有 messages，则不是 Claude Chat
+    if "prompt" in body and "messages" not in body:
+        return False
+    
     # 检查路径
     if "/messages" in path:
         return True
