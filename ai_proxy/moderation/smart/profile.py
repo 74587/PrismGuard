@@ -82,11 +82,19 @@ class ModerationProfile:
         return "请判断以下文本是否违规：\n{{text}}"
     
     def render_prompt(self, text: str) -> str:
-        """渲染提示词"""
+        """渲染提示词（带 HTML 转义）"""
+        import html
+        
         template = self.get_prompt_template()
+        
+        # 截断过长文本
         if len(text) > self.config.prompt.max_text_length:
             text = text[:self.config.prompt.max_text_length] + "..."
-        return template.replace("{{text}}", text)
+        
+        # HTML 转义特殊字符，防止注入攻击
+        escaped_text = html.escape(text)
+        
+        return template.replace("{{text}}", escaped_text)
     
     def get_db_path(self) -> str:
         """获取数据库路径"""

@@ -77,14 +77,25 @@ def basic_moderation(text: str, cfg: dict) -> Tuple[bool, Optional[str]]:
         (是否通过, 拒绝原因)
     """
     if not cfg.get("enabled", False):
+        print(f"[DEBUG] 基础审核: 未启用，跳过")
         return True, None
+    
+    print(f"[DEBUG] 基础审核开始")
+    print(f"  待审核文本: {text[:100]}{'...' if len(text) > 100 else ''}")
     
     keywords_file = cfg.get("keywords_file", "configs/keywords.txt")
     filter_obj = get_filter(keywords_file)
     
+    print(f"  关键词文件: {keywords_file}")
+    print(f"  已加载关键词数量: {len(filter_obj._patterns)}")
+    
     matched_kw = filter_obj.match(text)
     if matched_kw:
         error_code = cfg.get("error_code", "BASIC_MODERATION_BLOCKED")
+        print(f"[DEBUG] 基础审核结果: ❌ 违规")
+        print(f"  匹配关键词: {matched_kw}")
+        print(f"  错误码: {error_code}")
         return False, f"[{error_code}] Matched keyword: {matched_kw}"
     
+    print(f"[DEBUG] 基础审核结果: ✅ 通过")
     return True, None

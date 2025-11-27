@@ -8,6 +8,7 @@ from typing import Tuple, Optional
 from pydantic import BaseModel
 from openai import AsyncOpenAI
 
+from ai_proxy.config import settings
 from ai_proxy.moderation.smart.profile import get_profile, ModerationProfile
 from ai_proxy.moderation.smart.storage import SampleStorage
 
@@ -23,9 +24,12 @@ class ModerationResult(BaseModel):
 
 async def ai_moderate(text: str, profile: ModerationProfile) -> ModerationResult:
     """使用 AI 进行审核"""
-    api_key = os.getenv(profile.config.ai.api_key_env)
+    api_key = getattr(settings, profile.config.ai.api_key_env, None)
     if not api_key:
         raise ValueError(f"Environment variable {profile.config.ai.api_key_env} not set")
+    
+    print(f"[MODERATION] AI审核开始")
+    print(f"  文本: {text[:100]}{'...' if len(text) > 100 else ''}")
     
     client = AsyncOpenAI(
         api_key=api_key,
@@ -44,30 +48,43 @@ async def ai_moderate(text: str, profile: ModerationProfile) -> ModerationResult
         
         content = response.choices[0].message.content
         
-        # 解析 JSON
+        # 智能提取 JSON：删除第一个 { 前和最后一个 } 后的内容
         start = content.find("{")
         end = content.rfind("}") + 1
         if start >= 0 and end > start:
-            data = json.loads(content[start:end])
+            json_str = content[start:end]
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError:
+                violation = any(word in content.lower() for word in ["违规", "violation", "不当"])
+                data = {"violation": violation, "category": "unknown", "reason": content[:200]}
         else:
             violation = any(word in content.lower() for word in ["违规", "violation", "不当"])
             data = {"violation": violation, "category": "unknown", "reason": content[:200]}
         
-        return ModerationResult(
+        result = ModerationResult(
             violation=data.get("violation", False),
             category=data.get("category"),
             reason=data.get("reason"),
             source="ai"
         )
+        print(f"[MODERATION] AI审核结果: {'❌ 违规' if result.violation else '✅ 通过'}")
+        if result.category:
+            print(f"  类别: {result.category}")
+        if result.reason:
+            print(f"  原因: {result.reason[:100]}{'...' if len(result.reason) > 100 else ''}")
+        return result
     
     except Exception as e:
-        print(f"[ERROR] AI moderation failed: {e}")
-        return ModerationResult(
-            violation=False,
-            category="error",
-            reason=f"AI call failed: {str(e)}",
-            source="ai"
-        )
+        import traceback
+        print(f"\n{'='*60}")
+        print(f"[ERROR] AI moderation exception:")
+        print(f"Exception type: {type(e).__name__}")
+        print(f"Exception message: {e}")
+        print(f"Traceback:")
+        traceback.print_exc()
+        print(f"{'='*60}\n")
+        raise  # 重新抛出异常，让全局处理器捕获
 
 
 async def run_ai_moderation_and_log(text: str, profile: ModerationProfile) -> ModerationResult:
@@ -92,22 +109,32 @@ async def smart_moderation(text: str, cfg: dict) -> Tuple[bool, Optional[Moderat
     3. 无模型 -> 全部交 AI
     """
     if not cfg.get("enabled", False):
+        print(f"[DEBUG] 智能审核: 未启用，跳过")
         return True, None
+    
+    print(f"[DEBUG] 智能审核开始")
+    print(f"  待审核文本: {text[:100]}{'...' if len(text) > 100 else ''}")
     
     profile_name = cfg.get("profile", "default")
     profile = get_profile(profile_name)
     
+    print(f"  使用配置: {profile_name}")
+    print(f"  AI审核概率: {profile.config.probability.ai_review_rate * 100:.1f}%")
+    
     random.seed(profile.config.probability.random_seed)
     
     ai_rate = profile.config.probability.ai_review_rate
+    rand_val = random.random()
     
     # 1. 随机抽样：直接走 AI（用于持续产生标注）
-    if random.random() < ai_rate:
+    if rand_val < ai_rate:
+        print(f"[DEBUG] 决策路径: 随机抽样 (rand={rand_val:.3f} < {ai_rate:.3f}) -> AI审核")
         result = await run_ai_moderation_and_log(text, profile)
         return not result.violation, result
     
     # 2. 尝试本地词袋模型
     if profile.bow_model_exists():
+        print(f"[DEBUG] 决策路径: 词袋模型预测")
         from ai_proxy.moderation.smart.bow import bow_predict_proba
         
         try:
@@ -115,8 +142,12 @@ async def smart_moderation(text: str, cfg: dict) -> Tuple[bool, Optional[Moderat
             low_t = profile.config.probability.low_risk_threshold
             high_t = profile.config.probability.high_risk_threshold
             
+            print(f"  违规概率: {p:.3f}")
+            print(f"  阈值: 低风险 < {low_t:.3f}, 高风险 > {high_t:.3f}")
+            
             # 低风险：直接放行
             if p < low_t:
+                print(f"[DEBUG] 词袋模型结果: ✅ 低风险放行")
                 result = ModerationResult(
                     violation=False,
                     reason=f"BoW: low risk (p={p:.3f})",
@@ -127,6 +158,7 @@ async def smart_moderation(text: str, cfg: dict) -> Tuple[bool, Optional[Moderat
             
             # 高风险：直接拒绝
             if p > high_t:
+                print(f"[DEBUG] 词袋模型结果: ❌ 高风险拒绝")
                 result = ModerationResult(
                     violation=True,
                     reason=f"BoW: high risk (p={p:.3f})",
@@ -136,11 +168,14 @@ async def smart_moderation(text: str, cfg: dict) -> Tuple[bool, Optional[Moderat
                 return False, result
             
             # 不确定：交给 AI 复核
+            print(f"[DEBUG] 词袋模型结果: ⚠️ 不确定 -> AI复核")
             result = await run_ai_moderation_and_log(text, profile)
             return not result.violation, result
             
         except Exception as e:
-            print(f"[WARN] BoW prediction failed: {e}, fallback to AI")
+            print(f"[DEBUG] 词袋模型预测失败: {e} -> 回退到AI")
+    else:
+        print(f"[DEBUG] 决策路径: 无词袋模型 -> AI审核")
     
     # 3. 无模型或失败：全部交 AI
     result = await run_ai_moderation_and_log(text, profile)

@@ -17,9 +17,11 @@ class Settings(BaseSettings):
     MODERATION_LOG_FILE: str = "logs/moderation.log"
     TRAINING_LOG_FILE: str = "logs/training.log"
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    model_config = {
+        "env_file": ".env",
+        "case_sensitive": True,
+        "extra": "allow"  # 允许额外字段（如各种审核API key）
+    }
 
 
 settings = Settings()

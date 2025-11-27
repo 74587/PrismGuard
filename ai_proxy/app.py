@@ -2,7 +2,9 @@
 GuardianBridge (守桥) 主入口
 FastAPI 应用启动文件
 """
-from fastapi import FastAPI
+import traceback
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from ai_proxy.proxy.router import router
 from ai_proxy.config import settings
 
@@ -11,6 +13,22 @@ app = FastAPI(
     description="高级 AI API 中间件 - 智能审核 · 格式转换 · 透明代理",
     version="1.0.0"
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """全局异常处理器 - 打印详细错误"""
+    print(f"\n{'='*60}")
+    print(f"[ERROR] Unhandled exception:")
+    print(f"Path: {request.url.path}")
+    print(f"Exception: {exc}")
+    print(f"Traceback:")
+    traceback.print_exc()
+    print(f"{'='*60}\n")
+    
+    return JSONResponse(
+        status_code=500,
+        content={"error": {"message": str(exc), "type": type(exc).__name__}}
+    )
 
 app.include_router(router)
 

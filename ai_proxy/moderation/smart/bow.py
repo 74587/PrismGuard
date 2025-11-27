@@ -125,28 +125,40 @@ def bow_predict_proba(text: str, profile: ModerationProfile) -> float:
     Returns:
         违规概率 (0-1)
     """
+    print(f"[DEBUG] 词袋模型预测")
+    
     # 加载模型
     vectorizer = joblib.load(profile.get_vectorizer_path())
     clf = joblib.load(profile.get_model_path())
+    
+    print(f"  模型类型: {type(clf).__name__}")
+    print(f"  特征数量: {len(vectorizer.get_feature_names_out())}")
     
     # 预处理
     use_char_ngram = profile.config.bow_training.use_char_ngram
     corpus = [tokenize_for_bow(text, use_char_ngram)]
     X = vectorizer.transform(corpus)
     
+    print(f"  文本特征维度: {X.shape}")
+    print(f"  非零特征数: {X.nnz}")
+    
     # 预测概率
     if hasattr(clf, 'predict_proba'):
         # SGDClassifier(loss="log_loss") 和 LogisticRegression 都支持
         proba = clf.predict_proba(X)[0]
+        print(f"  概率分布: [正常={proba[0]:.3f}, 违规={proba[1]:.3f}]")
         if len(proba) > 1:
             return float(proba[1])  # 类别 1 = 违规
         return 0.0
     else:
         # 如果模型不支持 predict_proba，使用 decision_function
         score = clf.decision_function(X)[0]
+        print(f"  决策函数值: {score:.3f}")
         # 简单的 sigmoid 转换
         import math
-        return 1.0 / (1.0 + math.exp(-score))
+        prob = 1.0 / (1.0 + math.exp(-score))
+        print(f"  转换后概率: {prob:.3f}")
+        return prob
 
 
 def bow_predict(text: str, profile: ModerationProfile) -> ModerationResult:

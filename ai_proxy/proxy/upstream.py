@@ -2,6 +2,7 @@
 上游 HTTP 客户端封装
 """
 import httpx
+import json
 from typing import Optional, Dict, Any
 from fastapi.responses import StreamingResponse, JSONResponse
 
@@ -24,11 +25,13 @@ class UpstreamClient:
         """
         转发请求到上游
         """
-        # 过滤掉不需要的头
+        # 过滤掉不需要的头，并移除 Accept-Encoding 以避免 zstd 压缩
         filtered_headers = {
             k: v for k, v in headers.items()
-            if k.lower() not in ["host", "content-length"]
+            if k.lower() not in ["host", "content-length", "accept-encoding"]
         }
+        # 明确请求 gzip 或不压缩（httpx 支持 gzip 自动解压）
+        filtered_headers["Accept-Encoding"] = "gzip, deflate, identity"
         
         url = f"{self.base_url}{path}"
         
@@ -50,7 +53,7 @@ class UpstreamClient:
                     media_type="text/event-stream"
                 )
             else:
-                # 非流式请求
+                # 非流式请求（httpx 会自动处理 gzip 解压）
                 response = await self.client.request(
                     method,
                     url,
@@ -58,9 +61,16 @@ class UpstreamClient:
                     json=body
                 )
                 
+                # 尝试解析 JSON
+                try:
+                    content = response.json()
+                except Exception:
+                    # 非 JSON 响应，返回文本
+                    content = {"text": response.text, "status_code": response.status_code}
+                
                 return JSONResponse(
                     status_code=response.status_code,
-                    content=response.json()
+                    content=content
                 )
         
         except Exception as e:
