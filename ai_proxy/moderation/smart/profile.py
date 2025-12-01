@@ -3,8 +3,8 @@
 """
 import json
 import os
-from typing import Optional
-from pydantic import BaseModel
+from typing import Optional, List
+from pydantic import BaseModel, Field
 
 
 class AIConfig(BaseModel):
@@ -31,6 +31,14 @@ class ProbabilityConfig(BaseModel):
     high_risk_threshold: float = 0.8  # p > 0.8 直接判违规
 
 
+class VocabBucket(BaseModel):
+    """分层词表配置"""
+    name: str = "bucket"
+    min_doc_ratio: float = 0.0
+    max_doc_ratio: float = 1.0
+    limit: int = 1000
+
+
 class BoWTrainingConfig(BaseModel):
     """词袋模型训练配置"""
     min_samples: int = 200
@@ -53,6 +61,16 @@ class BoWTrainingConfig(BaseModel):
     
     # 数据库管理配置
     max_db_items: int = 100000  # 数据库最大项目数，超出后自动清理
+    
+    # 分层词表
+    use_layered_vocab: bool = True
+    vocab_buckets: List[VocabBucket] = Field(
+        default_factory=lambda: [
+            VocabBucket(name="high_freq", min_doc_ratio=0.05, max_doc_ratio=0.6, limit=1200),
+            VocabBucket(name="mid_freq", min_doc_ratio=0.01, max_doc_ratio=0.05, limit=2600),
+            VocabBucket(name="low_freq", min_doc_ratio=0.002, max_doc_ratio=0.01, limit=1200),
+        ]
+    )
 
 
 class ProfileConfig(BaseModel):

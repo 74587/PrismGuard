@@ -9,18 +9,72 @@ import random
 import jieba
 import joblib
 import numpy as np
+from collections import Counter
 from typing import List, Dict, Tuple, Optional
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import SGDClassifier, LogisticRegression
 from sklearn.utils.class_weight import compute_class_weight
 
-from ai_proxy.moderation.smart.profile import ModerationProfile
+from ai_proxy.moderation.smart.profile import ModerationProfile, BoWTrainingConfig
 from ai_proxy.moderation.smart.storage import SampleStorage
 from ai_proxy.moderation.smart.ai import ModerationResult
 
 
 # 模型缓存：{profile_name: (vectorizer, clf, model_mtime, vectorizer_mtime)}
 _model_cache: Dict[str, Tuple[object, object, float, float]] = {}
+
+
+def build_layered_vocabulary(doc_freqs: Counter, total_docs: int, cfg: BoWTrainingConfig) -> Optional[List[str]]:
+    """
+    根据文档频率构建分层词表
+    """
+    if not cfg.use_layered_vocab or total_docs == 0:
+        return None
+    
+    buckets = cfg.vocab_buckets or []
+    selected: List[str] = []
+    used = set()
+    
+    for bucket in buckets:
+        min_ratio = bucket.min_doc_ratio
+        max_ratio = bucket.max_doc_ratio
+        limit = bucket.limit
+        
+        if limit <= 0:
+            continue
+        
+        candidates = [
+            (token, df) for token, df in doc_freqs.items()
+            if token not in used and min_ratio <= (df / total_docs) < max_ratio
+        ]
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        
+        for token, _ in candidates[:limit]:
+            selected.append(token)
+            used.add(token)
+    
+    # 补足剩余特征（按文档频率降序）
+    max_features = cfg.max_features
+    if len(selected) < max_features:
+        remaining = [
+            (token, df) for token, df in doc_freqs.items()
+            if token not in used
+        ]
+        remaining.sort(key=lambda x: x[1], reverse=True)
+        
+        for token, _ in remaining:
+            if len(selected) >= max_features:
+                break
+            selected.append(token)
+    
+    if not selected:
+        return None
+    
+    if len(selected) > max_features:
+        selected = selected[:max_features]
+    
+    print(f"[BOW] 分层词表构建完成: 选中 {len(selected)} 个特征")
+    return selected
 
 
 def tokenize_for_bow(text: str, use_char_ngram: bool = True) -> str:
@@ -73,17 +127,31 @@ def train_bow_model(profile: ModerationProfile):
     
     print(f"[BOW] 开始训练，共 {len(samples)} 个样本")
     
-    # 文本预处理和分词
+    # 文本预处理和分词 + 统计文档频率
     use_char_ngram = cfg.use_char_ngram
-    corpus = [tokenize_for_bow(t, use_char_ngram) for t in texts]
+    corpus = []
+    doc_freqs = Counter()
+    
+    for text in texts:
+        tokenized = tokenize_for_bow(text, use_char_ngram)
+        corpus.append(tokenized)
+        tokens = tokenized.split()
+        doc_freqs.update(set(tokens))
     
     # 构建 TF-IDF 向量化器
     word_ngram = cfg.word_ngram_range
+    vocabulary = build_layered_vocabulary(doc_freqs, len(corpus), cfg)
+    
+    if vocabulary:
+        print(f"[BOW] 使用分层词汇表，覆盖度: {(len(vocabulary) / cfg.max_features) * 100:.1f}%")
+    
     vectorizer = TfidfVectorizer(
-        max_features=cfg.max_features,
+        max_features=None if vocabulary else cfg.max_features,
         ngram_range=tuple(word_ngram) if cfg.use_word_ngram else (1, 1),
         min_df=2,
-        max_df=0.8
+        max_df=0.8,
+        lowercase=False,
+        vocabulary=vocabulary
     )
     X = vectorizer.fit_transform(corpus)
     

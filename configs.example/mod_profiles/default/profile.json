@@ -28,6 +28,12 @@
     "model_type": "sgd_logistic",
     "batch_size": 2000,
     "max_seconds": 300,
-    "max_db_items": 100000
+    "max_db_items": 100000,
+    "use_layered_vocab": true,
+    "vocab_buckets": [
+      {"name": "high_freq", "min_doc_ratio": 0.05, "max_doc_ratio": 0.6, "limit": 1200},
+      {"name": "mid_freq", "min_doc_ratio": 0.01, "max_doc_ratio": 0.05, "limit": 2600},
+      {"name": "low_freq", "min_doc_ratio": 0.002, "max_doc_ratio": 0.01, "limit": 1200}
+    ]
   }
 }
