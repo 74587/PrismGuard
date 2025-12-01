@@ -3,7 +3,7 @@
 """
 from typing import Dict, Any, Optional, Tuple, List, Protocol
 from ai_proxy.transform.formats.internal_models import InternalChatRequest, InternalChatResponse
-from ai_proxy.transform.formats import openai_chat, claude_chat, openai_codex
+from ai_proxy.transform.formats import openai_chat, claude_chat, openai_codex, gemini_chat
 
 
 class FormatParser(Protocol):
@@ -91,8 +91,31 @@ class OpenAICodexParser:
         return openai_codex.internal_to_openai_codex_resp(resp)
 
 
+class GeminiChatParser:
+    """Gemini Chat 解析器"""
+    name = "gemini_chat"
+    
+    def can_parse(self, path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
+        return gemini_chat.can_parse_gemini_chat(path, headers, body)
+    
+    def from_format(self, body: Dict[str, Any]) -> InternalChatRequest:
+        return gemini_chat.from_gemini_chat(body)
+    
+    def to_format(self, req: InternalChatRequest) -> Dict[str, Any]:
+        return gemini_chat.to_gemini_chat(req)
+    
+    def resp_to_internal(self, resp: Dict[str, Any]) -> InternalChatResponse:
+        return gemini_chat.gemini_resp_to_internal(resp)
+    
+    def internal_to_resp(self, resp: InternalChatResponse) -> Dict[str, Any]:
+        return gemini_chat.internal_to_gemini_resp(resp)
+
+
 # 注册所有解析器
+# 注意：Gemini 格式必须放在最前面,因为它的特征最明显
+# 这样可以防止 Gemini 格式被误识别为 OpenAI 或 Claude 格式
 PARSERS: Dict[str, FormatParser] = {
+    "gemini_chat": GeminiChatParser(),
     "openai_chat": OpenAIChatParser(),
     "claude_chat": ClaudeChatParser(),
     "openai_codex": OpenAICodexParser(),

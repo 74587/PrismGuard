@@ -18,6 +18,15 @@ def can_parse_claude_chat(path: str, headers: Dict[str, str], body: Dict[str, An
     """
     判断是否为 Claude Chat 或 Claude Code 格式
     """
+    # 0. 优先排斥 Gemini Chat 格式
+    # Gemini 使用 "contents" 而非 "messages"
+    if "contents" in body and isinstance(body.get("contents"), list):
+        contents = body.get("contents", [])
+        if contents and isinstance(contents[0], dict):
+            # 检查是否有 Gemini 特有的 "parts" 字段
+            if "parts" in contents[0]:
+                return False
+    
     # 1. 优先排斥 OpenAI Chat 格式
     if "messages" in body and isinstance(body["messages"], list):
         for msg in body["messages"]:

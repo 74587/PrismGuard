@@ -13,6 +13,15 @@ from ai_proxy.transform.formats.internal_models import (
 
 def can_parse_openai_codex(path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
     """判断是否为 OpenAI Codex/Completions 格式"""
+    # 优先排斥 Gemini Chat 格式
+    # Gemini 使用 "contents" 而非 "messages" 或 "prompt"
+    if "contents" in body and isinstance(body.get("contents"), list):
+        contents = body.get("contents", [])
+        if contents and isinstance(contents[0], dict):
+            # 检查是否有 Gemini 特有的 "parts" 字段
+            if "parts" in contents[0]:
+                return False
+    
     # 排斥 OpenAI Chat 格式：如果路径是 /chat/completions，则不是 Codex
     if "/chat/completions" in path:
         return False
