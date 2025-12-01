@@ -5,11 +5,21 @@ import os
 import asyncio
 import time
 from datetime import datetime
-from typing import List
+from typing import List, Dict
 
 from ai_proxy.moderation.smart.profile import ModerationProfile
 from ai_proxy.moderation.smart.bow import train_bow_model
 from ai_proxy.moderation.smart.storage import SampleStorage
+
+# 记录每个 profile 的训练锁，避免重复训练
+_profile_locks: Dict[str, asyncio.Lock] = {}
+
+
+def get_profile_lock(profile_name: str) -> asyncio.Lock:
+    """获取对应 profile 的训练锁"""
+    if profile_name not in _profile_locks:
+        _profile_locks[profile_name] = asyncio.Lock()
+    return _profile_locks[profile_name]
 
 
 def get_all_profiles() -> List[str]:
@@ -65,8 +75,15 @@ async def train_all_profiles():
             profile = ModerationProfile(profile_name)
             
             if should_train(profile):
+                lock = get_profile_lock(profile_name)
+                
+                if lock.locked():
+                    print(f"[SCHEDULER] {profile_name} 正在训练中，跳过本次调度")
+                    continue
+                
                 print(f"[SCHEDULER] 开始训练: {profile_name}")
-                train_bow_model(profile)
+                async with lock:
+                    await asyncio.to_thread(train_bow_model, profile)
                 print(f"[SCHEDULER] 训练完成: {profile_name}")
             else:
                 storage = SampleStorage(profile.get_db_path())
