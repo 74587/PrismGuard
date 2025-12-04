@@ -135,6 +135,45 @@ class SampleStorage:
             for row in rows
         ]
     
+    def load_balanced_samples(self, max_samples: int = 20000) -> List[Sample]:
+        """
+        加载样本并尽量保持标签平衡
+        """
+        if max_samples <= 0:
+            return []
+        
+        pass_count, violation_count = self.get_label_counts()
+        if pass_count == 0 or violation_count == 0:
+            return self.load_samples(max_samples)
+        
+        base_per_label = max_samples // 2
+        remainder = max_samples - base_per_label * 2
+        pass_limit = base_per_label
+        violation_limit = base_per_label
+        
+        if remainder > 0:
+            if pass_count >= violation_count:
+                pass_limit += remainder
+            else:
+                violation_limit += remainder
+        
+        pass_samples = self._load_samples_by_label(0, pass_limit)
+        violation_samples = self._load_samples_by_label(1, violation_limit)
+        
+        if len(pass_samples) < pass_limit and violation_count > len(violation_samples):
+            need = min(pass_limit - len(pass_samples), max_samples - len(pass_samples) - len(violation_samples))
+            if need > 0:
+                violation_samples = self._load_samples_by_label(1, violation_limit + need)
+        
+        if len(violation_samples) < violation_limit and pass_count > len(pass_samples):
+            need = min(violation_limit - len(violation_samples), max_samples - len(pass_samples) - len(violation_samples))
+            if need > 0:
+                pass_samples = self._load_samples_by_label(0, pass_limit + need)
+        
+        combined = pass_samples + violation_samples
+        combined.sort(key=lambda s: s.created_at or "", reverse=True)
+        return combined[:max_samples]
+    
     def get_sample_count(self) -> int:
         """获取样本总数"""
         with self.pool.get_connection() as conn:
@@ -298,6 +337,34 @@ class SampleStorage:
             print(f"[DB清理] 新的样本分布: 成功={new_pass}, 失败={new_violation}")
         else:
             print(f"[DB清理] 无需删除样本")
+    
+    def _load_samples_by_label(self, label: int, limit: int) -> List[Sample]:
+        """按标签加载最新样本"""
+        if limit <= 0:
+            return []
+        with self.pool.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, text, label, category, created_at
+                FROM samples
+                WHERE label = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (label, limit)
+            )
+            rows = cursor.fetchall()
+        return [
+            Sample(
+                id=row[0],
+                text=row[1],
+                label=row[2],
+                category=row[3],
+                created_at=row[4]
+            )
+            for row in rows
+        ]
     
     def _delete_random_samples(self, label: int, count: int) -> int:
         """

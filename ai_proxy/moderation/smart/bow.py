@@ -121,7 +121,7 @@ def train_bow_model(profile: ModerationProfile):
         return
     
     # 加载样本
-    samples = storage.load_samples(cfg.max_samples)
+    samples = storage.load_balanced_samples(cfg.max_samples)
     texts = [s.text for s in samples]
     labels = [s.label for s in samples]
     
