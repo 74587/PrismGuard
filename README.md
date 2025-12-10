@@ -39,11 +39,12 @@
 
 支持主流 AI API 格式的自动检测和相互转换：
 
-- **自动格式检测**：智能识别 OpenAI Chat / Claude Messages API
-- **灵活转换策略**：支持任意格式互转（OpenAI ↔ Claude）
+- **自动格式检测**：智能识别 OpenAI Chat / Claude Messages / Google Gemini
+- **灵活转换策略**：支持任意格式互转（OpenAI ↔ Claude ↔ Gemini）
 - **完整工具调用支持**：
   - OpenAI: `tools` / `tool_calls` / `tool` role
   - Claude: `tools` / `tool_use` / `tool_result`
+- **多模态输入支持**：支持 OpenAI 格式的图像输入（`image_url`）
 - **流式和非流式兼容**：自动适配请求类型
 - **审核策略优化**：仅审核用户和助手文本，跳过工具参数和结果
 
@@ -54,6 +55,16 @@
 - **智能透传**：无法识别的格式自动透传原始请求
 - **多上游支持**：兼容任意 OpenAI 兼容的 API 服务
 - **错误处理**：详细的错误码和调试信息
+
+### 🛡️ 稳定性与性能
+
+- **内存守护**：内置内存监控，定期检查并清理超大对象，防止内存泄漏；在内存超过 2GB 时自动退出，保护系统稳定性。
+- **HTTP 客户端池**：复用 `httpx.AsyncClient` 实例，管理和复用上游连接，提升性能。
+- **SQLite 连接池**：为每个审核配置的数据库维护一个连接池，减少连接开销。
+- **缓存机制**：
+  - **关键词过滤器缓存**：关键词列表常驻内存，并限制最大缓存数量。
+  - **模型缓存**：词袋模型和向量化器常驻内存，仅在文件更新时重载。
+  - **审核结果缓存**：使用 LRU 缓存（每个 profile 20 条）缓存审核结果，避免重复计算。
 
 ## 📦 快速开始
 
@@ -104,6 +115,7 @@ DEBUG=True
 # 预定义配置（可选，用于缩短 URL）
 PROXY_CONFIG_DEFAULT={"basic_moderation":{"enabled":true,"keywords_file":"configs/keywords.txt"},"smart_moderation":{"enabled":true,"profile":"default"},"format_transform":{"enabled":false}}
 PROXY_CONFIG_CLAUDE={"basic_moderation":{"enabled":true,"keywords_file":"configs/keywords.txt"},"smart_moderation":{"enabled":true,"profile":"4claude"},"format_transform":{"enabled":true,"from":"openai_chat","to":"claude_chat"}}
+PROXY_CONFIG_GEMINI={"basic_moderation":{"enabled":true,"keywords_file":"configs/keywords.txt"},"smart_moderation":{"enabled":true,"profile":"default"},"format_transform":{"enabled":true,"from":"openai_chat","to":"gemini_chat"}}
 ```
 
 ### 4. 初始化配置文件
@@ -353,10 +365,10 @@ response = client.chat.completions.create(
 
 **参数说明**：
 - [`from`](ai_proxy/proxy/router.py:134): 源格式
-  - `"auto"`: 自动检测所有支持的格式（`openai_chat`, `claude_chat`, `claude_code`, `openai_codex`）
+  - `"auto"`: 自动检测所有支持的格式（`gemini_chat`, `openai_chat`, `claude_chat`, `openai_codex`）
   - `"openai_chat"`: 仅识别 OpenAI Chat 格式
   - `["openai_chat", "claude_chat"]`: 识别列表中的任意格式
-- [`to`](ai_proxy/proxy/router.py:184): 目标格式（`openai_chat` / `claude_chat` / `claude_code` / `openai_codex`）
+- [`to`](ai_proxy/proxy/router.py:184): 目标格式（`gemini_chat` / `openai_chat` / `claude_chat` / `openai_codex`）
 - [`stream`](ai_proxy/transform/formats/parser.py:1): 流式策略
   - `"auto"`: 保持原请求的流式设置
   - `"force_stream"`: 强制使用流式
@@ -439,11 +451,11 @@ HTTP 客户端
 └── transform/
     ├── extractor.py                # 文本抽取（避免审核工具参数）
     └── formats/
-        ├── internal_models.py      # 内部统一模型（支持工具调用）
+        ├── internal_models.py      # 内部统一模型（支持工具调用和多模态）
         ├── parser.py               # 格式解析器注册表（支持 disable_tools）
+        ├── gemini_chat.py          # Google Gemini 格式解析
         ├── openai_chat.py          # OpenAI Chat 格式解析
         ├── claude_chat.py          # Claude Messages 格式解析
-        ├── claude_code.py          # Claude Code (Agent SDK) 格式解析
         └── openai_codex.py         # OpenAI Codex/Completions 格式解析
 
 configs/
@@ -898,7 +910,8 @@ cp -r configs/mod_profiles/*/history.db backups/
 
 ### v1.1.0 (2024-11)
 
-- ✨ 新增 Claude Code (Agent SDK) 格式支持
+- ✨ 新增 Google Gemini 格式支持
+- ✨ 新增多模态（图像）输入支持
 - ✨ 新增 OpenAI Codex/Completions 格式支持
 - ✨ 新增 `disable_tools` 配置选项，禁用工具调用
 - ✨ 格式识别互斥机制，避免误识别
