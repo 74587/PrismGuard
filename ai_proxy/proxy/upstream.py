@@ -6,7 +6,7 @@ import json
 from typing import Optional, Dict, Any
 from fastapi.responses import StreamingResponse, JSONResponse
 from ai_proxy.utils.memory_guard import check_container
-from ai_proxy.proxy.stream_checker import StreamChecker
+from ai_proxy.proxy.stream_checker import StreamChecker, check_response_content
 
 
 # 全局 HTTP 客户端池（每个 base_url 一个客户端）
@@ -186,6 +186,25 @@ class UpstreamClient:
                         import traceback
                         traceback.print_exc()
                         # 转换失败时返回原始响应
+                
+                # 如果启用了内容检查（delay_stream_header 对非流式也生效）
+                if delay_stream_header and response.status_code == 200:
+                    # 使用 target_format（上游格式）进行检查
+                    check_format = target_format or "openai_chat"
+                    passed, error_msg = check_response_content(content, check_format)
+                    
+                    if not passed:
+                        print(f"[CONTENT_CHECK_FAILED] {error_msg}")
+                        return JSONResponse(
+                            status_code=400,
+                            content={
+                                "error": {
+                                    "code": "EMPTY_RESPONSE",
+                                    "message": error_msg,
+                                    "type": "content_validation_error"
+                                }
+                            }
+                        )
                 
                 return JSONResponse(
                     status_code=response.status_code,

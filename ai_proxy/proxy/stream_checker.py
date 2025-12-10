@@ -3,7 +3,7 @@
 用于在发送响应头之前检查流式内容是否有效（避免返回空回复）
 """
 import json
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict, Any
 
 class StreamChecker:
     """流式内容检查器"""
@@ -132,3 +132,81 @@ class StreamChecker:
                 # 检查函数调用（Gemini 的工具调用）
                 if "functionCall" in part:
                     self.has_tool_call = True
+
+
+def check_response_content(response: Dict[str, Any], format_name: str) -> Tuple[bool, Optional[str]]:
+    """
+    检查非流式响应内容是否满足条件
+    
+    Args:
+        response: 响应体（JSON 格式）
+        format_name: 响应格式名称
+    
+    Returns:
+        (是否通过, 错误消息)
+    """
+    accumulated_content = ""
+    has_tool_call = False
+    char_threshold = 2
+    
+    try:
+        if format_name == "gemini_chat":
+            # Gemini 格式
+            candidates = response.get("candidates", [])
+            for candidate in candidates:
+                content = candidate.get("content", {})
+                parts = content.get("parts", [])
+                
+                for part in parts:
+                    if "text" in part:
+                        accumulated_content += part.get("text", "")
+                    if "functionCall" in part:
+                        has_tool_call = True
+        
+        elif format_name == "openai_codex":
+            # OpenAI Codex/Completions 格式
+            choices = response.get("choices", [])
+            for choice in choices:
+                text = choice.get("text", "")
+                if text:
+                    accumulated_content += text
+        
+        elif format_name == "claude_chat":
+            # Claude 格式
+            content_blocks = response.get("content", [])
+            for block in content_blocks:
+                if block.get("type") == "text":
+                    accumulated_content += block.get("text", "")
+                elif block.get("type") == "tool_use":
+                    has_tool_call = True
+        
+        else:
+            # OpenAI Chat 格式（默认）
+            choices = response.get("choices", [])
+            for choice in choices:
+                message = choice.get("message", {})
+                content = message.get("content", "")
+                if content:
+                    accumulated_content += content
+                
+                # 检查工具调用
+                if message.get("tool_calls"):
+                    has_tool_call = True
+        
+        # 检查是否满足条件
+        if has_tool_call or len(accumulated_content) > char_threshold:
+            return True, None
+        
+        # 不满足条件
+        error_msg = (
+            f"Response content validation failed: "
+            f"accumulated {len(accumulated_content)} chars (threshold: {char_threshold}), "
+            f"has_tool_call: {has_tool_call}. "
+            f"The AI response appears to be empty or too short."
+        )
+        return False, error_msg
+    
+    except Exception as e:
+        # 解析错误时，保守处理：允许通过
+        print(f"[WARN] Response content check error: {e}")
+        return True, None
