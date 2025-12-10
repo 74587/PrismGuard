@@ -58,14 +58,20 @@ class StreamChecker:
         return False
     
     def _check_gemini_format(self, text: str) -> bool:
-        """检查 Gemini JSON Lines 格式"""
+        """检查 Gemini SSE 格式"""
         for line in text.split('\n'):
             line = line.strip()
             if not line:
                 continue
-                
+            
+            # Gemini 使用 SSE 格式：data: {...}
+            if not line.startswith('data: '):
+                continue
+            
+            data_str = line[6:]  # 移除 'data: ' 前缀
+            
             try:
-                data = json.loads(line)
+                data = json.loads(data_str)
                 self._parse_gemini_data(data)
                 
                 if self.has_tool_call or len(self.accumulated_content) > self.char_threshold:
