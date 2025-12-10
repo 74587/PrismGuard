@@ -120,10 +120,14 @@ class UpstreamClient:
                         # 如果循环结束（流结束了）还没有 valid，检查一下
                         # 此时 valid 仍为 False，buffer 包含所有数据
                         if not valid:
-                            # 检查是否真的为空或者只有空白字符
-                            # 这里策略：如果流正常结束但内容很少，我们还是返回它
-                            # 只有在发生异常断开时才认为是错误
-                            raise Exception("Stream disconnected before valid content")
+                            # 检查 buffer 是否为空或内容不足
+                            total_bytes = sum(len(b) for b in buffer)
+                            if total_bytes == 0:
+                                # 完全没有接收到任何数据
+                                raise Exception("Stream ended without any content")
+                            else:
+                                # 接收到了数据但不满足验证条件（内容太少或格式不对）
+                                raise Exception(f"Stream content validation failed: received {total_bytes} bytes but content is insufficient")
                             
                     except Exception as e:
                         print(f"[STREAM_PRE_READ_ERROR] {e}")
