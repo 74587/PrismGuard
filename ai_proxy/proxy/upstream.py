@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any
 from fastapi.responses import StreamingResponse, JSONResponse
 from ai_proxy.utils.memory_guard import check_container
 from ai_proxy.proxy.stream_checker import StreamChecker, check_response_content
-
+import asyncio
 
 # 全局 HTTP 客户端池（每个 base_url 一个客户端）
 _client_pool: Dict[str, httpx.AsyncClient] = {}
@@ -64,13 +64,14 @@ class UpstreamClient:
             target_format: 上游API格式（响应需要从此格式转换回 src_format）
             delay_stream_header: 是否延迟发送流式响应头（直到内容>2chars或有工具调用）
         """
-        # 过滤掉不需要的头，并移除 Accept-Encoding 以避免 zstd 压缩
+        # 过滤掉不需要的头，并移除 Accept-Encoding
         filtered_headers = {
             k: v for k, v in headers.items()
             if k.lower() not in ["host", "content-length", "accept-encoding"]
         }
-        # 明确请求 gzip 或不压缩（httpx 支持 gzip 自动解压）
-        filtered_headers["Accept-Encoding"] = "gzip, deflate, identity"
+        # 明确禁止压缩，避免编码问题
+        filtered_headers["Accept-Encoding"] = "identity"
+        print(f"[UPSTREAM] Request headers: {filtered_headers}")
         
         url = f"{self.base_url}{path}"
         
@@ -86,6 +87,12 @@ class UpstreamClient:
                 
                 response = await self.client.send(req, stream=True)
                 
+                # 打印上游响应头信息
+                print(f"[UPSTREAM] Upstream response status: {response.status_code}")
+                print(f"[UPSTREAM] Upstream response headers: {dict(response.headers)}")
+                print(f"[UPSTREAM] Upstream Content-Type: {response.headers.get('content-type', 'None')}")
+                print(f"[UPSTREAM] Upstream Content-Encoding: {response.headers.get('content-encoding', 'None')}")
+                
                 if response.status_code != 200:
                     await response.aclose()
                     # 非 200，读取 body 并返回 JSONResponse
@@ -98,24 +105,52 @@ class UpstreamClient:
 
                 # 启用延迟检查
                 if delay_stream_header:
+                    print(f"[UPSTREAM] delay_stream_header enabled, target_format={target_format}")
                     checker = StreamChecker(target_format or "openai_chat")
                     buffer = []
                     valid = False
+                    chunk_count = 0
                     
                     try:
-                        # 预读迭代器
+                        # 创建迭代器
                         aiter = response.aiter_bytes()
                         
-                        # 预读循环
-                        async for chunk in aiter:
-                            buffer.append(chunk)
-                            if checker.check_chunk(chunk):
-                                valid = True
+                        print(f"[UPSTREAM] Starting stream pre-read loop... {target_format}")
+                        # 预读循环 - 使用迭代器
+                        while True:
+                            try:
+                                chunk = await aiter.__anext__()
+                                chunk_count += 1
+                                print(f"[UPSTREAM] Received chunk #{chunk_count}, size={len(chunk)}")
+                                
+                                # 打印 chunk 的内容（前500字符）
+                                try:
+                                    chunk_text = chunk.decode('utf-8')
+                                    print(f"[UPSTREAM] Chunk content: {chunk_text[:500]}")
+                                except:
+                                    print(f"[UPSTREAM] Chunk raw bytes: {chunk[:100]}")
+                                
+                                buffer.append(chunk)
+                                
+                                check_result = checker.check_chunk(chunk)
+                                print(f"[UPSTREAM] check_chunk returned: {check_result}")
+                                
+                                if check_result:
+                                    valid = True
+                                    print(f"[UPSTREAM] Stream validation passed after {chunk_count} chunks, total_bytes={sum(len(b) for b in buffer)}")
+                                    break
+                                
+                                # 保护性限制：如果超过 1KB 还没满足条件，强制放行
+                                current_size = sum(len(b) for b in buffer)
+                                if current_size > 1048:
+                                    print(f"[UPSTREAM] Protection limit: forcing pass after {current_size} bytes in {chunk_count} chunks")
+                                    valid = True # 视为通过，避免一直卡住
+                                    break
+                            except StopAsyncIteration:
+                                print(f"[UPSTREAM] Stream ended during pre-read")
                                 break
-                            # 保护性限制：如果超过 8KB 还没满足条件，强制放行
-                            if sum(len(b) for b in buffer) > 8192:
-                                valid = True # 视为通过，避免一直卡住
-                                break
+                        
+                        print(f"[UPSTREAM] Stream pre-read loop ended: valid={valid}, chunk_count={chunk_count}, total_bytes={sum(len(b) for b in buffer)}")
                         
                         # 如果循环结束（流结束了）还没有 valid，检查一下
                         # 此时 valid 仍为 False，buffer 包含所有数据
@@ -124,46 +159,130 @@ class UpstreamClient:
                             total_bytes = sum(len(b) for b in buffer)
                             if total_bytes == 0:
                                 # 完全没有接收到任何数据
+                                print(f"[UPSTREAM] ERROR: Stream ended without any content")
                                 raise Exception("Stream ended without any content")
                             else:
                                 # 接收到了数据但不满足验证条件（内容太少或格式不对）
+                                print(f"[UPSTREAM] ERROR: Stream validation failed after receiving {total_bytes} bytes in {chunk_count} chunks")
                                 raise Exception(f"Stream content validation failed: received {total_bytes} bytes but content is insufficient")
                             
                     except Exception as e:
-                        print(f"[STREAM_PRE_READ_ERROR] {e}")
+                        print(f"[UPSTREAM] STREAM_PRE_READ_ERROR: {e}")
+                        import traceback
+                        traceback.print_exc()
                         await response.aclose()
                         return JSONResponse(
                             status_code=502,
-                            content={"error": {"code": "UPSTREAM_STREAM_ERROR", "message": "Stream disconnected before valid content"}}
+                            content={"error": {"code": "UPSTREAM_STREAM_ERROR", "message": f"Stream disconnected before valid content: {str(e)}"}}
                         )
 
                     # 构造新的生成器，先发 buffer，再发剩余流
+                    print(f"[UPSTREAM] Creating combined generator with {len(buffer)} buffered chunks")
+                    print(f"[UPSTREAM] Buffer content preview: {buffer[0][:200] if buffer else 'empty'}")
+                    
                     async def combined_generator():
+                        print(f"[UPSTREAM] ⚡ Generator started! This should appear when client starts reading")
                         try:
-                            for chunk in buffer:
+                            # 先输出缓冲的内容 - 保持原始字节
+                            print(f"[UPSTREAM] Yielding {len(buffer)} buffered chunks")
+                            for i, chunk in enumerate(buffer):
+                                print(f"!!! chunk={chunk.decode()}")
+                                # await asyncio.sleep(0.1)
                                 yield chunk
-                            async for chunk in aiter:
-                                yield chunk
+                            
+                            # 继续从迭代器读取剩余内容
+                            print(f"[UPSTREAM] Continuing with remaining stream...")
+                            remaining_count = 0
+                            try:
+                                while True:
+                                    chunk = await aiter.__anext__()
+                                    print(f"!!! chunk={chunk.decode()[:100]}")
+                                    remaining_count += 1
+                                    yield chunk
+                            except StopAsyncIteration:
+                                print(f"[UPSTREAM] Stream completed, yielded {remaining_count} remaining chunks")
+                        except Exception as e:
+                            print(f"[UPSTREAM] ❌ Generator exception: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            raise
                         finally:
+                            print(f"[UPSTREAM] Closing response connection")
                             await response.aclose()
 
-                    return StreamingResponse(
+                    # # 保持原始的 Content-Type，但确保指定 charset=utf-8
+                    # original_content_type = response.headers.get("content-type", "text/event-stream")
+                    # print(f"[UPSTREAM] Original Content-Type: {original_content_type}")
+                    
+                    # # 如果 Content-Type 没有指定 charset，添加 charset=utf-8
+                    # if "charset" not in original_content_type.lower():
+                    #     original_content_type = f"{original_content_type}; charset=utf-8"
+                    #     print(f"[UPSTREAM] Added charset=utf-8 to Content-Type: {original_content_type}")
+                    
+                    print(f"[UPSTREAM] All response headers: {dict(response.headers)}")
+                    
+                    # 构建要传递的响应头
+                    # ⚠️ 过滤掉不应该透传的头：
+                    # - 传输编码相关：httpx 已自动处理
+                    # - 认证相关：上游的 cookie 不应传给客户端
+                    # - 安全策略头：上游的安全策略不应该应用到代理域名
+                    filtered_header_names = [
+                        "content-length", "transfer-encoding", "content-encoding",  # 传输编码
+                        "set-cookie",  # 认证
+                        "strict-transport-security",  # HSTS - 会强制 HTTPS
+                        "content-security-policy", "content-security-policy-report-only",  # CSP
+                        "x-frame-options",  # 禁止嵌入
+                        "x-content-type-options",  # MIME 嗅探
+                        "x-xss-protection",  # XSS 过滤
+                        "permissions-policy",  # 浏览器功能限制
+                        "referrer-policy",  # Referer 策略
+                    ]
+                    pass_headers = {k: v for k, v in response.headers.items()
+                                   if k.lower() not in filtered_header_names}
+                    print(f"[UPSTREAM] Passing headers (after filtering): {pass_headers}")
+                    print(f"[UPSTREAM] Checking if content-encoding was removed: 'content-encoding' in pass_headers = {'content-encoding' in pass_headers}")
+                    # print(f"[UPSTREAM] Returning StreamingResponse with media_type={original_content_type}")
+                    
+                    streaming_resp = StreamingResponse(
                         combined_generator(),
-                        media_type="text/event-stream"
+                        # media_type=original_content_type,
+                        headers=pass_headers
                     )
+                    print(f"[UPSTREAM] StreamingResponse object created, returning to caller")
+                    return streaming_resp
                 
                 else:
                     # 不延迟，直接透传
-                    async def simple_generator():
-                        try:
-                            async for chunk in response.aiter_bytes():
-                                yield chunk
-                        finally:
-                            await response.aclose()
-                            
+                    # async def simple_generator():
+                    #     try:
+                    #         async for chunk in response.aiter_bytes():
+                    #             print(f"!!! chunk = {chunk}")
+                    #             yield chunk
+                    #     finally:
+                    #         await response.aclose()
+                    
+                    # # 保持原始的 Content-Type，但确保指定 charset=utf-8
+                    # original_content_type = response.headers.get("content-type", "text/event-stream")
+                    # if "charset" not in original_content_type.lower():
+                    #     original_content_type = f"{original_content_type}; charset=utf-8"
+                    
+                    # ⚠️ 使用相同的过滤策略
+                    filtered_header_names = [
+                        "content-length", "transfer-encoding", "content-encoding",
+                        "set-cookie",
+                        "strict-transport-security",
+                        "content-security-policy", "content-security-policy-report-only",
+                        "x-frame-options",
+                        "x-content-type-options",
+                        "x-xss-protection",
+                        "permissions-policy",
+                        "referrer-policy",
+                    ]
                     return StreamingResponse(
-                        simple_generator(),
-                        media_type="text/event-stream"
+                        response.aiter_bytes(),
+                        # media_type=original_content_type,
+                        headers={k: v for k, v in response.headers.items()
+                                if k.lower() not in filtered_header_names}
                     )
             else:
                 # 非流式请求（httpx 会自动处理 gzip 解压）

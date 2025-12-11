@@ -299,6 +299,25 @@ async def proxy_entry(cfg_and_upstream: str, request: Request):
     # 默认为 False
     delay_stream_header = transform_cfg.get("delay_stream_header", False)
     
+    # 判断是否流式请求
+    # 对于 Gemini 格式，通过 URL 判断（streamGenerateContent）
+    # 对于其他格式，通过 body.stream 字段判断
+    is_stream_request = False
+    if isinstance(body, dict):
+        if src_format == "gemini_chat":
+            # Gemini 通过 URL 端点判断
+            is_stream_request = "streamGenerateContent" in upstream_path
+            print(f"[ROUTER] Gemini format: checking URL for stream, path={upstream_path}, is_stream={is_stream_request}")
+        else:
+            # 其他格式通过 body.stream 判断
+            is_stream_request = body.get("stream", False)
+            print(f"[ROUTER] Non-Gemini format: checking body.stream={is_stream_request}")
+    
+    print(f"[ROUTER] Format info: src_format={src_format}, target_format_cfg={target_format_cfg}")
+    print(f"[ROUTER] need_response_transform={need_response_transform}, delay_stream_header={delay_stream_header}")
+    print(f"[ROUTER] is_stream_request={is_stream_request}")
+    print(f"[ROUTER] Will pass target_format={(target_format_cfg if (need_response_transform or delay_stream_header) else None)}")
+    
     # 转发请求
     # 注意：即使不需要响应转换，如果启用了 delay_stream_header，
     # 也需要传递格式信息用于内容检查
@@ -308,7 +327,7 @@ async def proxy_entry(cfg_and_upstream: str, request: Request):
             path=path,
             headers=dict(request.headers),
             body=transformed_body if transformed_body else body,
-            is_stream=body.get("stream", False) if isinstance(body, dict) else False,
+            is_stream=is_stream_request,
             src_format=src_format if need_response_transform else None,
             target_format=target_format_cfg if (need_response_transform or delay_stream_header) else None,
             delay_stream_header=delay_stream_header

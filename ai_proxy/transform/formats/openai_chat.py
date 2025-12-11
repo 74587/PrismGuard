@@ -253,7 +253,7 @@ def openai_chat_resp_to_internal(resp: Dict[str, Any]) -> InternalChatResponse:
     OpenAI Chat 响应 -> 内部格式
     """
     choice = resp.get("choices", [{}])[0]
-    message = choice.get("message", {})
+    message = choice.get("message") or {}
     
     # 解析消息内容
     blocks = []

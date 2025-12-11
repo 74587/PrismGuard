@@ -13,6 +13,7 @@ class StreamChecker:
         self.accumulated_content = ""
         self.has_tool_call = False
         self.char_threshold = 2
+        self.accumulated_bytes = b""  # 用于累积 Gemini 的不完整 JSON
         
     def check_chunk(self, chunk: bytes) -> bool:
         """
@@ -20,20 +21,30 @@ class StreamChecker:
         Returns:
             bool: 是否已满足放行条件（内容>2chars 或 有工具调用）
         """
+        # 先打印调试信息再检查条件
+        print(f"[DEBUG] check_chunk called: format={self.format_name}, chunk_size={len(chunk)}, chunk_preview={chunk[:100].__repr__()}")
+        
         if self.has_tool_call or len(self.accumulated_content) > self.char_threshold:
+            print(f"[DEBUG] Already satisfied: has_tool_call={self.has_tool_call}, content_len={len(self.accumulated_content)}")
             return True
-            
+        
         try:
             text = chunk.decode("utf-8")
-        except UnicodeDecodeError:
+            print(f"[DEBUG] Decoded chunk text (first 200 chars): {text[:200]}")
+        except UnicodeDecodeError as e:
             # 忽略解码错误的块（可能是被截断的多字节字符）
+            print(f"[DEBUG] UnicodeDecodeError: {e}")
             return False
         
-        # 检测格式：Gemini 使用 JSON Lines，OpenAI/Claude 使用 SSE
+        # 检测格式：Gemini 使用 SSE，OpenAI/Claude 也使用 SSE
         if self.format_name == "gemini_chat":
-            return self._check_gemini_format(text)
+            result = self._check_gemini_format(text)
+            print(f"[DEBUG] Gemini format check result: {result}")
+            return result
         else:
-            return self._check_sse_format(text)
+            result = self._check_sse_format(text)
+            print(f"[DEBUG] SSE format check result: {result}")
+            return result
     
     def _check_sse_format(self, text: str) -> bool:
         """检查 SSE 格式（OpenAI/Claude）"""
@@ -58,27 +69,47 @@ class StreamChecker:
         return False
     
     def _check_gemini_format(self, text: str) -> bool:
-        """检查 Gemini SSE 格式"""
-        for line in text.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            
-            # Gemini 使用 SSE 格式：data: {...}
-            if not line.startswith('data: '):
-                continue
-            
-            data_str = line[6:]  # 移除 'data: ' 前缀
-            
+        """
+        检查 Gemini 流式格式
+        
+        Gemini 流式响应格式：
+        [{"candidates"...}    ← 第一个 chunk，去掉 [ 后是完整的 JSON
+        ,
+        {"candidates"...}     ← 后续 chunk
+        ]
+        """
+        print(f"[DEBUG] _check_gemini_format: processing {len(text)} chars")
+        print(f"[DEBUG] Gemini text preview: {text[:300]}")
+        
+        text_stripped = text.strip()
+        
+        # 情况 1: 第一个 chunk，格式为 [{...}
+        # 直接去掉开头的 [，剩下的就是完整的 JSON 对象
+        if text_stripped.startswith('['):
+            text_stripped = text_stripped[1:].strip()
+            print(f"[DEBUG] Removed leading '[', now parsing: {text_stripped[:200]}")
+        
+        # 情况 2: 后续 chunk，格式为 ,\n{...}
+        # 去掉开头的逗号
+        if text_stripped.startswith(','):
+            text_stripped = text_stripped[1:].strip()
+            print(f"[DEBUG] Removed leading ',', now parsing: {text_stripped[:200]}")
+        
+        # 现在 text_stripped 应该是 {...} 格式的完整 JSON 对象
+        if text_stripped.startswith('{'):
             try:
-                data = json.loads(data_str)
+                data = json.loads(text_stripped)
+                print(f"[DEBUG] Gemini parsed as JSON object")
+                
                 self._parse_gemini_data(data)
                 
                 if self.has_tool_call or len(self.accumulated_content) > self.char_threshold:
+                    print(f"[DEBUG] Gemini check satisfied: has_tool_call={self.has_tool_call}, content_len={len(self.accumulated_content)}")
                     return True
-            except json.JSONDecodeError:
-                continue
-                
+            except json.JSONDecodeError as e:
+                print(f"[DEBUG] JSON parse error: {e}")
+        
+        print(f"[DEBUG] Gemini check not satisfied yet: content_len={len(self.accumulated_content)}")
         return False
 
     def _parse_data(self, data: dict):
@@ -122,21 +153,30 @@ class StreamChecker:
     
     def _parse_gemini_data(self, data: dict):
         """解析 Gemini 格式的数据"""
+        print(f"[DEBUG] _parse_gemini_data: {data}")  # 修复 f-string
         candidates = data.get("candidates", [])
         if not candidates:
+            print(f"[DEBUG] No candidates in Gemini data")
             return
+        
+        print(f"[DEBUG] Processing {len(candidates)} candidates")
         
         for candidate in candidates:
             content = candidate.get("content", {})
             parts = content.get("parts", [])
             
+            print(f"[DEBUG] Candidate has {len(parts)} parts")
+            
             for part in parts:
                 # 检查文本内容
                 if "text" in part:
-                    self.accumulated_content += part.get("text", "")
+                    text_content = part.get("text", "")
+                    print(f"[DEBUG] Found text in part: {text_content[:100]}")
+                    self.accumulated_content += text_content
                 
                 # 检查函数调用（Gemini 的工具调用）
                 if "functionCall" in part:
+                    print(f"[DEBUG] Found functionCall in part")
                     self.has_tool_call = True
 
 

@@ -14,6 +14,14 @@ from ai_proxy.transform.formats.internal_models import (
 )
 
 
+def is_gemini_stream_request(path: str) -> bool:
+    """
+    判断 Gemini 请求是否为流式
+    Gemini 通过 URL 端点区分流式和非流式
+    """
+    return "streamGenerateContent" in path
+
+
 def can_parse_gemini_chat(path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
     """
     判断是否为 Gemini Chat 格式
@@ -74,9 +82,13 @@ def can_parse_gemini_chat(path: str, headers: Dict[str, str], body: Dict[str, An
     return False
 
 
-def from_gemini_chat(body: Dict[str, Any]) -> InternalChatRequest:
+def from_gemini_chat(body: Dict[str, Any], path: str = "") -> InternalChatRequest:
     """
     Gemini Chat 格式 -> 内部格式
+    
+    Args:
+        body: 请求体
+        path: URL 路径（用于判断是否流式）
     
     Gemini 格式示例：
     {
@@ -159,16 +171,19 @@ def from_gemini_chat(body: Dict[str, Any]) -> InternalChatRequest:
     # 提取模型和其他配置
     generation_config = body.get("generationConfig", {})
     
+    # Gemini 流式通过 URL 端点判断，不是通过 body 中的 stream 字段
+    is_stream = is_gemini_stream_request(path)
+    
     return InternalChatRequest(
         messages=messages,
         model=body.get("model", "gemini-2.5-flash"),
-        stream=False,  # Gemini 流式通过不同的端点
+        stream=is_stream,
         tools=tools,
         tool_choice=body.get("toolConfig"),
         extra={
             "generationConfig": generation_config,
             "safetySettings": body.get("safetySettings", []),
-            **{k: v for k, v in body.items() 
+            **{k: v for k, v in body.items()
                if k not in ["contents", "model", "tools", "toolConfig", "generationConfig", "safetySettings"]}
         }
     )
@@ -305,7 +320,7 @@ def gemini_resp_to_internal(resp: Dict[str, Any]) -> InternalChatResponse:
         )
     
     candidate = candidates[0]
-    content = candidate.get("content", {})
+    content = candidate.get("content") or {}
     
     blocks = []
     for part in content.get("parts", []):

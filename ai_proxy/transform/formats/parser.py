@@ -95,11 +95,16 @@ class GeminiChatParser:
     """Gemini Chat 解析器"""
     name = "gemini_chat"
     
+    def __init__(self):
+        self._last_path = ""  # 存储最后一次解析的路径
+    
     def can_parse(self, path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
+        self._last_path = path  # 保存路径供 from_format 使用
         return gemini_chat.can_parse_gemini_chat(path, headers, body)
     
     def from_format(self, body: Dict[str, Any]) -> InternalChatRequest:
-        return gemini_chat.from_gemini_chat(body)
+        # 使用保存的路径来判断是否流式
+        return gemini_chat.from_gemini_chat(body, self._last_path)
     
     def to_format(self, req: InternalChatRequest) -> Dict[str, Any]:
         return gemini_chat.to_gemini_chat(req)
