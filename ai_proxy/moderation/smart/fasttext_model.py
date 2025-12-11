@@ -21,6 +21,14 @@ def train_fasttext_model(profile: ModerationProfile):
     Args:
         profile: 配置对象
     """
+    # 降低训练进程优先级，避免影响主服务
+    try:
+        original_nice = os.nice(0)
+        os.nice(10)  # 提高nice值10，降低优先级
+        print(f"[FastText] 训练进程优先级已调整 (nice: {original_nice} -> {os.nice(0)})")
+    except Exception as e:
+        print(f"[FastText] 无法调整进程优先级: {e}")
+    
     storage = SampleStorage(profile.get_db_path())
     cfg = profile.config.fasttext_training
     
