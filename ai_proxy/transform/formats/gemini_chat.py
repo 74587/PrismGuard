@@ -14,14 +14,6 @@ from ai_proxy.transform.formats.internal_models import (
 )
 
 
-def is_gemini_stream_request(path: str) -> bool:
-    """
-    判断 Gemini 请求是否为流式
-    Gemini 通过 URL 端点区分流式和非流式
-    """
-    return "streamGenerateContent" in path
-
-
 def can_parse_gemini_chat(path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
     """
     判断是否为 Gemini Chat 格式
@@ -88,7 +80,12 @@ def from_gemini_chat(body: Dict[str, Any], path: str = "") -> InternalChatReques
     
     Args:
         body: 请求体
-        path: URL 路径（用于判断是否流式）
+        path: URL 路径（保留参数以保持接口兼容性，但不再用于判断流式）
+    
+    注意：
+        根据 octopus 项目规范，流式请求应通过请求体中的 stream 字段判断，
+        而不是通过 URL 路径。Gemini 原生 API 虽然使用不同端点区分流式，
+        但在我们的中间件场景中，应该使用统一的 stream 字段。
     
     Gemini 格式示例：
     {
@@ -171,8 +168,10 @@ def from_gemini_chat(body: Dict[str, Any], path: str = "") -> InternalChatReques
     # 提取模型和其他配置
     generation_config = body.get("generationConfig", {})
     
-    # Gemini 流式通过 URL 端点判断，不是通过 body 中的 stream 字段
-    is_stream = is_gemini_stream_request(path)
+    # 根据 octopus 规范，流式标志应从请求体中获取
+    # Gemini 原生 API 不在 body 中包含 stream 字段，但我们的中间件支持它
+    # 如果客户端没有提供，默认为 False（非流式）
+    is_stream = body.get("stream", False)
     
     return InternalChatRequest(
         messages=messages,

@@ -56,12 +56,12 @@ def parse_url_config(cfg_and_upstream: str) -> Tuple[dict, str]:
 
 async def process_request(
     config: dict, body: dict, path: str, headers: dict
-) -> Tuple[bool, Optional[str], Optional[Tuple[dict, Optional[str]]], Optional[str]]:
+) -> Tuple[bool, Optional[str], Optional[Tuple[dict, Optional[str]]], Optional[str], Optional[InternalChatRequest]]:
     """
     处理请求审核和格式转换
 
     Returns:
-        (通过, 错误信息, (转换后的body, 转换后的path)或错误详情, 源格式名称)
+        (通过, 错误信息, (转换后的body, 转换后的path)或错误详情, 源格式名称, 内部请求对象)
     """
     try:
         return await _process_request_impl(config, body, path, headers)
@@ -80,7 +80,7 @@ async def process_request(
 
 async def _process_request_impl(
     config: dict, body: dict, path: str, headers: dict
-) -> Tuple[bool, Optional[str], Optional[Tuple[dict, Optional[str]]], Optional[str]]:
+) -> Tuple[bool, Optional[str], Optional[Tuple[dict, Optional[str]]], Optional[str], Optional[InternalChatRequest]]:
     """实际的请求处理逻辑"""
     print(f"\n[DEBUG] ========== 请求处理开始 ==========")
     print(f"  路径: {path}")
@@ -105,7 +105,7 @@ async def _process_request_impl(
             passed, reason = basic_moderation(text, basic_mod_cfg)
             if not passed:
                 print(f"[DEBUG] ========== 请求被拒绝（基础审核） ==========\n")
-                return False, reason, None, None
+                return False, reason, None, None, None
 
         # 智能审核
         if config.get("smart_moderation", {}).get("enabled"):
@@ -124,10 +124,10 @@ async def _process_request_impl(
                     error_msg += f" (category: {result.category})"
                 if result.confidence is not None:
                     error_msg += f" (confidence: {result.confidence:.3f})"
-                return False, error_msg, details, None
+                return False, error_msg, details, None, None
 
         print(f"[DEBUG] ========== 请求通过审核 ==========\n")
-        return True, None, (body, None), None
+        return True, None, (body, None), None, None
 
     # 检测并解析来源格式
     config_from = transform_cfg.get("from", "auto")
@@ -153,12 +153,12 @@ async def _process_request_impl(
             )
             print(f"[DEBUG] 严格解析模式：{error_msg}")
             print(f"[DEBUG] ========== 请求被拒绝（解析失败） ==========\n")
-            return False, error_msg, None, None
+            return False, error_msg, None, None, None
         else:
             # 非严格模式：透传
             print(f"[DEBUG] 无法识别格式，透传")
             print(f"[DEBUG] ========== 请求处理结束 ==========\n")
-            return True, None, (body, None), None
+            return True, None, (body, None), None, None
 
     print(f"  检测到格式: {src_format}")
 
@@ -172,7 +172,7 @@ async def _process_request_impl(
         passed, reason = basic_moderation(text, basic_mod_cfg)
         if not passed:
             print(f"[DEBUG] ========== 请求被拒绝（基础审核） ==========\n")
-            return False, reason, None, src_format
+            return False, reason, None, src_format, internal_req
 
     # 智能审核
     if config.get("smart_moderation", {}).get("enabled"):
@@ -191,7 +191,7 @@ async def _process_request_impl(
                 error_msg += f" (category: {result.category})"
             if result.confidence is not None:
                 error_msg += f" (confidence: {result.confidence:.3f})"
-            return False, error_msg, details, src_format
+            return False, error_msg, details, src_format, internal_req
 
     # 格式转换
     target_format = transform_cfg.get("to", src_format)
@@ -219,10 +219,10 @@ async def _process_request_impl(
             except Exception as e:
                 print(f"[DEBUG] 格式转换失败: {e}")
                 print(f"[DEBUG] ========== 请求处理失败 ==========\n")
-                return False, f"Format transform error: {str(e)}", None, src_format
+                return False, f"Format transform error: {str(e)}", None, src_format, internal_req
 
     print(f"[DEBUG] ========== 请求通过审核 ==========\n")
-    return True, None, (transformed_body, transformed_path), src_format
+    return True, None, (transformed_body, transformed_path), src_format, internal_req
 
 
 @router.api_route("/{cfg_and_upstream:path}", methods=["GET", "POST", "PUT", "DELETE"])
@@ -267,7 +267,7 @@ async def proxy_entry(cfg_and_upstream: str, request: Request):
     # print("[DEBUG]", body)
 
     # 处理审核和转换
-    passed, error_msg, data, src_format = await process_request(
+    passed, error_msg, data, src_format, internal_req = await process_request(
         config, body, path, dict(request.headers)
     )
 
@@ -337,18 +337,15 @@ async def proxy_entry(cfg_and_upstream: str, request: Request):
     delay_stream_header = transform_cfg.get("delay_stream_header", False)
     
     # 判断是否流式请求
-    # 对于 Gemini 格式，通过 URL 判断（streamGenerateContent）
-    # 对于其他格式，通过 body.stream 字段判断
     is_stream_request = False
-    if isinstance(body, dict):
-        if src_format == "gemini_chat":
-            # Gemini 通过 URL 端点判断
-            is_stream_request = "streamGenerateContent" in upstream_path
-            print(f"[ROUTER] Gemini format: checking URL for stream, path={upstream_path}, is_stream={is_stream_request}")
-        else:
-            # 其他格式通过 body.stream 判断
-            is_stream_request = body.get("stream", False)
-            print(f"[ROUTER] Non-Gemini format: checking body.stream={is_stream_request}")
+    if internal_req:
+        # 如果有 internal_req，直接从解析后的对象获取 stream 标志
+        is_stream_request = internal_req.stream
+        print(f"[ROUTER] Using stream flag from internal request: {is_stream_request}")
+    elif isinstance(body, dict):
+        # 如果没有 internal_req (例如透传或转换被禁用)，回退到检查原始 body
+        is_stream_request = body.get("stream", False)
+        print(f"[ROUTER] Fallback: checking body.stream={is_stream_request}")
     
     # ✅ 修复：即使不需要格式转换，delay_stream_header 也需要知道正确的格式
     # 否则 StreamChecker 会默认使用 openai_chat 格式，导致无法正确解析 Gemini 的 JSON 数组流

@@ -3,7 +3,7 @@
 """
 from typing import Dict, Any, Optional, Tuple, List, Protocol
 from ai_proxy.transform.formats.internal_models import InternalChatRequest, InternalChatResponse
-from ai_proxy.transform.formats import openai_chat, claude_chat, openai_codex, gemini_chat
+from ai_proxy.transform.formats import openai_chat, claude_chat, openai_responses, gemini_chat
 
 
 class FormatParser(Protocol):
@@ -92,28 +92,28 @@ class ClaudeChatParser:
         return claude_chat.internal_to_claude_resp(resp)
 
 
-class OpenAICodexParser:
-    """OpenAI Codex/Completions 解析器"""
-    name = "openai_codex"
-    
+class OpenAIResponsesParser:
+    """OpenAI Responses 解析器"""
+    name = "openai_responses"
+
     def can_parse(self, path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
-        return openai_codex.can_parse_openai_codex(path, headers, body)
-    
+        return openai_responses.can_parse_openai_responses(path, headers, body)
+
     def from_format(self, body: Dict[str, Any]) -> InternalChatRequest:
-        return openai_codex.from_openai_codex(body)
-    
+        return openai_responses.from_openai_responses(body)
+
     def to_format(self, req: InternalChatRequest) -> Dict[str, Any]:
-        return openai_codex.to_openai_codex(req)
-    
+        return openai_responses.to_openai_responses(req)
+
     def get_target_path(self, req: InternalChatRequest, original_path: str) -> str:
-        """OpenAI Codex 格式的标准路径"""
-        return "/v1/completions"
-    
+        """OpenAI Responses API 路径"""
+        return "/v1/responses"
+
     def resp_to_internal(self, resp: Dict[str, Any]) -> InternalChatResponse:
-        return openai_codex.openai_codex_resp_to_internal(resp)
-    
+        return openai_responses.openai_responses_resp_to_internal(resp)
+
     def internal_to_resp(self, resp: InternalChatResponse) -> Dict[str, Any]:
-        return openai_codex.internal_to_openai_codex_resp(resp)
+        return openai_responses.internal_to_openai_responses_resp(resp)
 
 
 class GeminiChatParser:
@@ -161,7 +161,7 @@ PARSERS: Dict[str, FormatParser] = {
     "gemini_chat": GeminiChatParser(),
     "openai_chat": OpenAIChatParser(),
     "claude_chat": ClaudeChatParser(),
-    "openai_codex": OpenAICodexParser(),
+    "openai_responses": OpenAIResponsesParser(),
 }
 
 
@@ -192,8 +192,7 @@ def detect_and_parse(
     """
     # 1. 如果禁用工具，排除仅支持工具的格式
     if disable_tools:
-        # Claude Code 和 OpenAI Codex 主要用于工具调用，应该被排除
-        tool_only_formats = ["openai_codex"]
+        tool_only_formats = []
     else:
         tool_only_formats = []
     

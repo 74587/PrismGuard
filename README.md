@@ -367,10 +367,10 @@ response = client.chat.completions.create(
 
 **参数说明**：
 - [`from`](ai_proxy/proxy/router.py:134): 源格式
-  - `"auto"`: 自动检测所有支持的格式（`gemini_chat`, `openai_chat`, `claude_chat`, `openai_codex`）
+  - `"auto"`: 自动检测所有支持的格式（`gemini_chat`, `openai_chat`, `claude_chat`, `openai_responses`）
   - `"openai_chat"`: 仅识别 OpenAI Chat 格式
   - `["openai_chat", "claude_chat"]`: 识别列表中的任意格式
-- [`to`](ai_proxy/proxy/router.py:184): 目标格式（`gemini_chat` / `openai_chat` / `claude_chat` / `openai_codex`）
+- [`to`](ai_proxy/proxy/router.py:184): 目标格式（`gemini_chat` / `openai_chat` / `claude_chat` / `openai_responses`）
 - [`stream`](ai_proxy/transform/formats/parser.py:1): 流式策略
   - `"auto"`: 保持原请求的流式设置
   - `"force_stream"`: 强制使用流式
@@ -384,13 +384,15 @@ response = client.chat.completions.create(
 - `delay_stream_header`: 延迟发送流式响应头（新增）
   - `false`: 立即发送响应头（默认）
   - `true`: 暂缓发送响应头，直到累计 >2 字符内容或出现工具调用。若上游在有效内容前断开连接，将返回 JSON 错误而非 200 OK + 断流。
+- `stream_transform`: 流式互转能力
+  - 当前已支持 `openai_responses ↔ openai_chat` 的 SSE 转换，其它格式仍采用透传策略。
 
 #### 禁用工具调用配置
 
 当 `disable_tools: true` 时：
 
 1. **自动排除格式**：
-   - `claude_code` 和 `openai_codex` 格式会被自动排除
+   - `claude_code` 会被自动排除
    - 这两个格式主要用于工具调用场景
 
 2. **检测并拒绝**：
@@ -458,7 +460,7 @@ HTTP 客户端
         ├── gemini_chat.py          # Google Gemini 格式解析
         ├── openai_chat.py          # OpenAI Chat 格式解析
         ├── claude_chat.py          # Claude Messages 格式解析
-        └── openai_codex.py         # OpenAI Codex/Completions 格式解析
+        └── openai_responses.py     # OpenAI Responses API 格式解析
 
 configs/
 ├── keywords.txt                    # 关键词黑名单
@@ -914,7 +916,7 @@ cp -r configs/mod_profiles/*/history.db backups/
 
 - ✨ 新增 Google Gemini 格式支持
 - ✨ 新增多模态（图像）输入支持
-- ✨ 新增 OpenAI Codex/Completions 格式支持
+- ✨ 新增 OpenAI Responses API 格式支持
 - ✨ 新增 `disable_tools` 配置选项，禁用工具调用
 - ✨ 格式识别互斥机制，避免误识别
 - 🐛 修复 `cache_control` 字段检测逻辑

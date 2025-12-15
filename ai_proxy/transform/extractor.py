@@ -105,13 +105,22 @@ def _extract_from_claude_chat(body: Dict[str, Any]) -> str:
 
 def _extract_from_openai_response(body: Dict[str, Any]) -> str:
     """从 OpenAI Response 格式提取文本"""
-    # TODO: 根据实际 Response API 结构实现
-    input_text = body.get("input", "")
+    # 优先处理 prompt 字段，这在 completion API 中更常见
+    prompt = body.get("prompt")
+    if isinstance(prompt, str):
+        return prompt
+    if isinstance(prompt, list):
+        # 如果 prompt 是一个字符串列表，将它们连接起来
+        return "\n".join(str(p) for p in prompt if isinstance(p, str))
+
+    # 其次处理 input 字段
+    input_text = body.get("input")
     if isinstance(input_text, str):
         return input_text
     
-    # 如果有 messages，按 chat 格式处理
+    # 如果有 messages，按 chat 格式处理 (作为后备)
     if "messages" in body:
         return _extract_from_openai_chat(body)
     
-    return str(input_text)
+    # 最后的后备方案
+    return str(prompt or input_text or "")

@@ -148,7 +148,7 @@ config_disable_tools = {
     },
     "format_transform": {
         "enabled": True,
-        "from": "auto",  # 自动检测，但会排除 claude_code 和 openai_codex
+        "from": "auto",  # 自动检测，但会排除 claude_code
         "to": "openai_chat",
         "disable_tools": True  # 禁用工具调用：拒绝包含工具的请求
     }
@@ -229,7 +229,7 @@ if __name__ == "__main__":
     print("=" * 60)
     
     print("\n1. 禁用工具调用 (disable_tools):")
-    print("   - 自动排除 claude_code 和 openai_codex 格式")
+    print("   - 自动排除 claude_code 格式")
     print("   - 拒绝包含 tools、tool_choice、tool calls 的请求")
     print("   - 覆盖 format_transform.from 配置")
     url8 = create_proxy_url(config_disable_tools, "https://api.openai.com/v1")
@@ -248,7 +248,7 @@ if __name__ == "__main__":
 disable_tools 配置项说明:
   - 功能: 禁用所有工具调用相关功能
   - 作用范围:
-    1. 自动排除仅支持工具的格式 (claude_code, openai_codex)
+    1. 自动排除仅支持工具的格式 (claude_code)
     2. 检测并拒绝包含以下内容的请求:
        - tools 字段 (工具定义)
        - tool_choice 字段 (工具选择)

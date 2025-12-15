@@ -290,11 +290,23 @@ def fasttext_predict_proba_jieba(text: str, profile: ModerationProfile) -> float
     print(f"  预测概率: {probs}")
     
     # 找出"违规"标签（__label__1）的概率
-    violation_prob = 0.0
+    violation_prob = None
+    safe_prob = None
+    
     for label, p in zip(labels, probs):
         if label == "__label__1":
             violation_prob = float(p)
-            break
+        elif label == "__label__0":
+            safe_prob = float(p)
+    
+    # 如果没有直接返回违规概率，但有正常概率，则计算违规概率
+    if violation_prob is None:
+        if safe_prob is not None:
+            # 违规概率 = 1 - 正常概率
+            violation_prob = 1.0 - safe_prob
+        else:
+            # 边缘情况：两个标签都没有返回（不应该发生，但作为后备）
+            violation_prob = 0.0
     
     print(f"  违规概率: {violation_prob:.3f}")
     return violation_prob

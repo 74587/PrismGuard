@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any, AsyncIterator
 from fastapi.responses import StreamingResponse, JSONResponse
 from ai_proxy.utils.memory_guard import check_container
 from ai_proxy.proxy.stream_checker import StreamChecker, check_response_content
+from ai_proxy.proxy.stream_transformer import create_stream_transformer
 import asyncio
 
 # 全局 HTTP 客户端池（每个 base_url 一个客户端）
@@ -418,13 +419,39 @@ class UpstreamClient:
         to_format: str,
         use_gzip: bool = False
     ) -> AsyncIterator[bytes]:
-        """创建组合生成器（带格式转换）- 暂时透传"""
+        """创建组合生成器（带格式转换）"""
         print(f"[UPSTREAM] ⚡ Transform generator started: {from_format} -> {to_format} (gzip={use_gzip})")
-        print(f"[UPSTREAM] Note: Stream response transform is not yet fully implemented, falling back to passthrough")
-        
-        # 暂时直接调用无转换版本
-        async for chunk in self._create_combined_generator(buffer, aiter, response, use_gzip):
-            yield chunk
+
+        if use_gzip:
+            print("[UPSTREAM] ⚠️  gzip 流无法转换，降级为透传")
+            async for chunk in self._create_combined_generator(buffer, aiter, response, use_gzip):
+                yield chunk
+            return
+
+        transformer = create_stream_transformer(from_format, to_format)
+        if transformer is None:
+            print("[UPSTREAM] ℹ️  未找到匹配的流式转换器，透传响应")
+            async for chunk in self._create_combined_generator(buffer, aiter, response, use_gzip):
+                yield chunk
+            return
+
+        try:
+            for chunk in buffer:
+                for out in transformer.feed(chunk):
+                    yield out
+
+            while True:
+                try:
+                    chunk = await aiter.__anext__()
+                except StopAsyncIteration:
+                    break
+                for out in transformer.feed(chunk):
+                    yield out
+        finally:
+            for tail in transformer.flush():
+                yield tail
+            print(f"[UPSTREAM] Closing response connection (transformed stream)")
+            await response.aclose()
     
     def _transform_response(
         self,

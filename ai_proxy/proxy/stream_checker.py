@@ -121,7 +121,7 @@ class StreamChecker:
 
     def _parse_data(self, data: dict):
         """解析单条数据"""
-        # OpenAI Chat 和 Codex 格式
+        # OpenAI Chat 和 Responses 格式
         if "choices" in data and isinstance(data["choices"], list):
             for choice in data["choices"]:
                 # OpenAI Chat: 使用 delta.content
@@ -130,7 +130,7 @@ class StreamChecker:
                 if content:
                     self.accumulated_content += content
                 
-                # OpenAI Codex/Completions: 使用 text 字段
+                # 兼容部分旧格式：若 chunk 中存在 text 字段，则追加
                 text = choice.get("text")
                 if text:
                     self.accumulated_content += text
@@ -139,24 +139,39 @@ class StreamChecker:
                 if delta.get("tool_calls"):
                     self.has_tool_call = True
                     
+        # Responses SSE 事件
+        dtype = data.get("type")
+        if isinstance(dtype, str) and dtype.startswith("response."):
+            self._parse_responses_event(data)
+
         # Claude 格式 (假设通过 upstream 已经是转为兼容格式，或者透传)
         # 如果是透传的 Claude 原生 SSE，它是 event: ... data: ...
         # 这里简化处理，尝试识别常见的 type
-        if "type" in data:
-            dtype = data["type"]
-            if dtype == "content_block_delta":
-                delta = data.get("delta", {})
-                if delta.get("type") == "text_delta":
-                    self.accumulated_content += delta.get("text", "")
-            elif dtype == "message_start":
-                # 检查 message 中的 content 是否有 tool_use
-                msg = data.get("message", {})
-                for c in msg.get("content", []):
-                    if c.get("type") == "tool_use":
-                        self.has_tool_call = True
-            elif dtype == "content_block_start":
-                 if data.get("content_block", {}).get("type") == "tool_use":
-                     self.has_tool_call = True
+        if dtype == "content_block_delta":
+            delta = data.get("delta", {})
+            if delta.get("type") == "text_delta":
+                self.accumulated_content += delta.get("text", "")
+        elif dtype == "message_start":
+            msg = data.get("message", {})
+            for c in msg.get("content", []):
+                if c.get("type") == "tool_use":
+                    self.has_tool_call = True
+        elif dtype == "content_block_start":
+            if data.get("content_block", {}).get("type") == "tool_use":
+                self.has_tool_call = True
+
+    def _parse_responses_event(self, data: dict):
+        """解析 OpenAI Responses SSE 事件"""
+        dtype = data.get("type")
+        if dtype == "response.output_text.delta":
+            delta = data.get("delta") or data.get("text") or ""
+            self.accumulated_content += delta
+        elif dtype in {"response.function_call_arguments.delta", "response.function_call.delta"}:
+            self.has_tool_call = True
+        elif dtype == "response.output_item.added":
+            item = data.get("item") or {}
+            if item.get("type") == "function_call":
+                self.has_tool_call = True
     
     def _parse_gemini_data(self, data: dict):
         """解析 Gemini 格式的数据"""
@@ -221,13 +236,24 @@ def check_response_content(response: Dict[str, Any], format_name: str) -> Tuple[
                     if "functionCall" in part:
                         has_tool_call = True
         
-        elif format_name == "openai_codex":
-            # OpenAI Codex/Completions 格式
-            choices = response.get("choices", [])
-            for choice in choices:
-                text = choice.get("text", "")
-                if text:
-                    accumulated_content += text
+        elif format_name == "openai_responses":
+            # OpenAI Responses 格式
+            output_items = response.get("output", [])
+            for item in output_items:
+                item_type = item.get("type")
+                if item_type == "function_call":
+                    has_tool_call = True
+                elif item_type in {"function_call_output", "tool_result"}:
+                    has_tool_call = True
+                else:
+                    content = item.get("content") or {}
+                    parts = content.get("items") if isinstance(content, dict) else content
+                    if isinstance(parts, list):
+                        for part in parts:
+                            if isinstance(part, dict) and part.get("type") in {"output_text", "input_text", "text"}:
+                                accumulated_content += part.get("text", "")
+                    elif isinstance(content, str):
+                        accumulated_content += content
         
         elif format_name == "claude_chat":
             # Claude 格式

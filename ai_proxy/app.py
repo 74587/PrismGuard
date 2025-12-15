@@ -3,6 +3,7 @@ GuardianBridge (守桥) 主入口
 FastAPI 应用启动文件
 """
 import traceback
+import sys
 import asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -10,6 +11,7 @@ from ai_proxy.proxy.router import router
 from ai_proxy.config import settings
 from ai_proxy.moderation.smart.scheduler import start_scheduler
 from ai_proxy.utils.memory_guard import check_all_tracked, check_process_memory
+from ai_proxy.utils.env_check import check_dependencies, DependencyError
 
 app = FastAPI(
     title="GuardianBridge",
@@ -43,6 +45,20 @@ async def startup_event():
     global _scheduler_started, _memory_guard_task
     
     print("[INFO] GuardianBridge 启动")
+
+    # 执行环境依赖检查
+    try:
+        check_dependencies()
+    except DependencyError as e:
+        print(f"\n{'='*60}", file=sys.stderr)
+        print(f"[FATAL] 环境依赖检查失败，应用无法启动。", file=sys.stderr)
+        print(f"错误: {e}", file=sys.stderr)
+        print(f"{'='*60}\n", file=sys.stderr)
+        # 在异步上下文中，不能直接 sys.exit()，可以通过抛出异常来阻止启动
+        # 或者更直接地，对于 uvicorn，可以这样停止服务器
+        # 这里我们选择更简单的方式，打印错误并让它继续，但理想情况下应该停止服务器
+        # 对于生产环境，启动脚本应该处理非零退出码
+        sys.exit(1) # 这在某些服务器上可能无法正常工作，但对于开发模式是有效的
     
     # 防止重复启动调度器（reload模式下可能多次触发）
     if not _scheduler_started:
