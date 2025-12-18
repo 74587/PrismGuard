@@ -1,5 +1,5 @@
 """
-GuardianBridge (守桥) 主入口
+PrismGuard (棱镜守卫) 主入口
 FastAPI 应用启动文件
 """
 import traceback
@@ -14,7 +14,7 @@ from ai_proxy.utils.memory_guard import check_all_tracked, check_process_memory
 from ai_proxy.utils.env_check import check_dependencies, DependencyError
 
 app = FastAPI(
-    title="GuardianBridge",
+    title="PrismGuard",
     description="高级 AI API 中间件 - 智能审核 · 格式转换 · 透明代理",
     version="1.0.0"
 )
@@ -44,7 +44,7 @@ async def startup_event():
     """应用启动时执行"""
     global _scheduler_started, _memory_guard_task
     
-    print("[INFO] GuardianBridge 启动")
+    print("[INFO] PrismGuard 启动")
 
     # 执行环境依赖检查
     try:
@@ -95,7 +95,7 @@ async def shutdown_event():
     """应用关闭时清理资源"""
     global _memory_guard_task
     
-    print("[INFO] GuardianBridge 正在关闭...")
+    print("[INFO] PrismGuard 正在关闭...")
     
     # 取消内存守护任务
     if _memory_guard_task:
@@ -126,7 +126,7 @@ async def shutdown_event():
     cleanup_filters()
     print("[INFO] 关键词过滤器已清理")
     
-    print("[INFO] GuardianBridge 已关闭")
+    print("[INFO] PrismGuard 已关闭")
 
 app.include_router(router)
 

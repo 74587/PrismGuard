@@ -1,4 +1,4 @@
-# GuardianBridge
+# PrismGuard
 
 **企业级 AI API 智能中间件** - 内容审核 · 格式转换 · 透明代理
 
@@ -61,7 +61,7 @@ response = client.chat.completions.create(
 ```bash
 # 克隆项目
 git clone <repository-url>
-cd GuardianBridge
+cd PrismGuard
 
 # 安装依赖（推荐使用 uv）
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -401,4 +401,4 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 
 ---
 
-**GuardianBridge** - 守护你的 AI API 🛡️
+**PrismGuard** - 守护你的 AI API 🛡️

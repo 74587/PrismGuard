@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# GuardianBridge 启动脚本（使用 uv）
+# PrismGuard 启动脚本（使用 uv）
 
 # 查找 uv 可执行文件
 UV_CMD=""
@@ -26,5 +26,5 @@ fi
 
 # 使用 uv 运行（自动管理虚拟环境和依赖）
 # 注意：supervisor 需要进程在前台运行，所以不使用 --reload
-echo "启动 GuardianBridge..."
+echo "启动 PrismGuard..."
 exec $UV_CMD run uvicorn ai_proxy.app:app --host 0.0.0.0 --port 8000
