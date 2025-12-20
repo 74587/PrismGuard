@@ -347,10 +347,11 @@ PROXY_CONFIG_GEMINI={"basic_moderation":{"enabled":true},"smart_moderation":{"en
 
 - AI 审核结果会写入 `history.db`（SQLite）
 - 会先查库去重（同文本不重复请求 AI）
-- 训练数据加载支持 3 种策略（由 profile 配置决定，目标总量约为 `max_samples`）：
-  - `balanced_undersample`：随机欠采样做 1:1 平衡；每类取 `min(各类总数, max_samples/2)`，并打乱合并（实现见 [`load_balanced_samples()`](ai_proxy/moderation/smart/storage.py:246)）
-  - `latest_full`：平衡“全量模式”；每类取最新 `min(各类总数, max_samples/2)`，再打乱合并（实现见 [`load_balanced_latest_samples()`](ai_proxy/moderation/smart/storage.py:203)）
-  - `random_full`：平衡“全量随机模式”；每类随机抽 `min(各类总数, max_samples/2)`，再打乱合并（实现见 [`load_balanced_random_samples()`](ai_proxy/moderation/smart/storage.py:235)）
+- 训练数据加载支持 3 种策略（由 profile 配置决定）：
+  - `balanced_undersample`：欠采样随机 1:1 平衡；每类取 `min(少数类总数, max_samples/2)`，合并后打乱（实现见 [`load_balanced_samples()`](ai_proxy/moderation/smart/storage.py:180)）
+  - `latest_full`：full-最新（不强制 1:1）；每类最多取 `max_samples/2` 个“最新样本”，合并后打乱（实现见 [`load_balanced_latest_samples()`](ai_proxy/moderation/smart/storage.py:221)）
+  - `random_full`：full-随机（不强制 1:1）；每类最多取 `max_samples/2` 个“随机样本”，合并后打乱（实现见 [`load_balanced_random_samples()`](ai_proxy/moderation/smart/storage.py:250)）
+- full 模式的核心约束：**每类都有独立上限 `max_samples/2`，不会被另一类挤占**；因此当分布为 正=25/负=75 且 `max_samples=100` 时，训练集会是 `25 正 + 50 负 = 75`（不会去补满到 100）。
 - 数据库可按上限清理并 VACUUM 释放空间
 
 ### 4) 本地模型：BoW vs fastText

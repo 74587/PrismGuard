@@ -208,55 +208,53 @@ class SampleStorage:
 
     def load_balanced_latest_samples(self, max_samples: int = 20000) -> List[Sample]:
         """
-        平衡加载最新样本（每类最多 max_samples/2，按时间倒序，不随机）
+        “Full” 最新策略：按类分别取样，但不强制 1:1 平衡
+        - 每类最多取 max_samples/2
+        - 不允许一类挤占另一类配额
+        - 每类内部按时间倒序取最新样本
         """
         if max_samples <= 0:
             return []
 
         pass_count, violation_count = self.get_label_counts()
-        if pass_count == 0 or violation_count == 0:
-            print(f"[WARNING] 标签不平衡: 正常={pass_count}, 违规={violation_count}")
-            print(f"[WARNING] 无法进行平衡采样，返回空列表")
-            return []
-
         target_per_label = max_samples // 2
         if target_per_label <= 0:
             return []
 
-        balanced_count = min(pass_count, violation_count, target_per_label)
+        pass_take = min(pass_count, target_per_label)
+        violation_take = min(violation_count, target_per_label)
 
-        print(f"[BalancedLatest] 数据库样本分布: 正常={pass_count}, 违规={violation_count}")
-        print(f"[BalancedLatest] 每类取最新 {balanced_count} 个样本（不随机）")
+        print(f"[CappedLatest] 数据库样本分布: 正常={pass_count}, 违规={violation_count}")
+        print(f"[CappedLatest] 每类最多取 {target_per_label} 个：正常取 {pass_take}，违规取 {violation_take}")
 
-        pass_samples = self._load_samples_by_label(0, balanced_count)
-        violation_samples = self._load_samples_by_label(1, balanced_count)
+        pass_samples = self._load_samples_by_label(0, pass_take)
+        violation_samples = self._load_samples_by_label(1, violation_take)
 
         combined = pass_samples + violation_samples
         random.shuffle(combined)
-        print(f"[BalancedLatest] 最终样本: 正常={len(pass_samples)}, 违规={len(violation_samples)}, 总计={len(combined)}")
+        print(f"[CappedLatest] 最终样本: 正常={len(pass_samples)}, 违规={len(violation_samples)}, 总计={len(combined)}")
         return combined
 
     def load_balanced_random_samples(self, max_samples: int = 20000) -> List[Sample]:
         """
-        平衡随机加载样本（每类最多 max_samples/2，全库随机，不复制）
+        “Full” 随机策略：按类分别取样，但不强制 1:1 平衡
+        - 每类最多取 max_samples/2
+        - 不允许一类挤占另一类配额
+        - 每类内部全库随机抽样，不复制样本
         """
         if max_samples <= 0:
             return []
 
         pass_count, violation_count = self.get_label_counts()
-        if pass_count == 0 or violation_count == 0:
-            print(f"[WARNING] 标签不平衡: 正常={pass_count}, 违规={violation_count}")
-            print(f"[WARNING] 无法进行平衡采样，返回空列表")
-            return []
-
         target_per_label = max_samples // 2
         if target_per_label <= 0:
             return []
 
-        balanced_count = min(pass_count, violation_count, target_per_label)
+        pass_take = min(pass_count, target_per_label)
+        violation_take = min(violation_count, target_per_label)
 
-        print(f"[BalancedRandom] 数据库样本分布: 正常={pass_count}, 违规={violation_count}")
-        print(f"[BalancedRandom] 每类随机抽取 {balanced_count} 个样本（不复制）")
+        print(f"[CappedRandom] 数据库样本分布: 正常={pass_count}, 违规={violation_count}")
+        print(f"[CappedRandom] 每类最多取 {target_per_label} 个：正常取 {pass_take}，违规取 {violation_take}")
 
         with self.pool.get_connection() as conn:
             cursor = conn.cursor()
@@ -268,7 +266,7 @@ class SampleStorage:
                 ORDER BY RANDOM()
                 LIMIT ?
                 """,
-                (balanced_count,),
+                (pass_take,),
             )
             pass_rows = cursor.fetchall()
 
@@ -280,7 +278,7 @@ class SampleStorage:
                 ORDER BY RANDOM()
                 LIMIT ?
                 """,
-                (balanced_count,),
+                (violation_take,),
             )
             violation_rows = cursor.fetchall()
 
@@ -295,7 +293,7 @@ class SampleStorage:
 
         combined = pass_samples + violation_samples
         random.shuffle(combined)
-        print(f"[BalancedRandom] 最终样本: 正常={len(pass_samples)}, 违规={len(violation_samples)}, 总计={len(combined)}")
+        print(f"[CappedRandom] 最终样本: 正常={len(pass_samples)}, 违规={len(violation_samples)}, 总计={len(combined)}")
         return combined
     
     def load_balanced_samples(self, max_samples: int = 20000) -> List[Sample]:
