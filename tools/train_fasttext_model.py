@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
-fastText 模型训练工具
+fastText 模型训练工具（可被主进程调度器以子进程方式调用）
 用法: python tools/train_fasttext_model.py <profile_name>
+
+重要约定（自动训练依赖）：
+- 本脚本会被 [`ai_proxy/moderation/smart/scheduler._run_training_subprocess()`](ai_proxy/moderation/smart/scheduler.py:1)
+  以 `sys.executable -u tools/train_fasttext_model.py <profile>` 启动，用于把训练峰值内存隔离在子进程中。
+- 跨进程互斥通过 profile 目录下的 `.train.lock` 实现；若锁已存在表示已有训练在进行中。
+- 当检测到锁已存在时，本脚本应以 exit code=2 退出（调度器据此“跳过本轮”，而非视为训练失败）。
+  - exit code=0: 训练完成
+  - exit code=1: 训练失败/异常
+  - exit code=2: 锁占用/已有训练进行中
 
 根据配置自动选择分词方式：
 - use_tiktoken=false, use_jieba=false: 字符级 n-gram（原版）
@@ -11,6 +20,7 @@ fastText 模型训练工具
 """
 import sys
 import os
+import time
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,6 +29,39 @@ from ai_proxy.moderation.smart.profile import ModerationProfile
 from ai_proxy.moderation.smart.fasttext_model import train_fasttext_model
 from ai_proxy.moderation.smart.fasttext_model_jieba import train_fasttext_model_jieba
 from ai_proxy.moderation.smart.storage import SampleStorage
+
+
+def _training_lock_path(profile: ModerationProfile) -> str:
+    return os.path.join(profile.base_dir, ".train.lock")
+
+
+def _acquire_file_lock(lock_path: str, stale_seconds: int = 24 * 3600) -> bool:
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            payload = f"pid={os.getpid()}\ncreated_at={int(time.time())}\n"
+            os.write(fd, payload.encode("utf-8", errors="replace"))
+        finally:
+            os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            mtime = os.path.getmtime(lock_path)
+            if (time.time() - mtime) > stale_seconds:
+                os.remove(lock_path)
+                return _acquire_file_lock(lock_path, stale_seconds=stale_seconds)
+        except Exception:
+            pass
+        return False
+
+
+def _release_file_lock(lock_path: str) -> None:
+    try:
+        os.remove(lock_path)
+    except FileNotFoundError:
+        return
+    except Exception:
+        return
 
 
 def main():
@@ -98,11 +141,16 @@ def main():
         print(f"开始训练（使用字符级 n-gram）...\n")
         train_func = train_fasttext_model
     
+    lock_path = _training_lock_path(profile)
+    if not _acquire_file_lock(lock_path):
+        print(f"❌ 当前配置正在训练中（文件锁存在）: {lock_path}")
+        sys.exit(2)
+
     try:
         train_func(profile)
         print(f"\n✅ 训练完成")
         print(f"模型已保存: {profile.get_fasttext_model_path()}")
-        
+
         # 提示信息
         if cfg.use_tiktoken and cfg.use_jieba:
             print(f"\n💡 提示: 使用了 tiktoken + jieba 组合分词（实验性功能）")
@@ -115,6 +163,8 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        _release_file_lock(lock_path)
 
 
 if __name__ == "__main__":

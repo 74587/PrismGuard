@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 """
-fastText 模型训练工具（jieba 分词版本）
+fastText 模型训练工具（jieba 分词版本，可被主进程调度器以子进程方式调用）
 
 使用 jieba 分词 + fastText 训练，更适合中文文本
+
+重要约定（自动训练依赖）：
+- 本脚本可能被 [`ai_proxy/moderation/smart/scheduler._run_training_subprocess()`](ai_proxy/moderation/smart/scheduler.py:1)
+  间接调用（通常调度器优先调用 `tools/train_fasttext_model.py`，由其根据配置选择分词方式）。
+- 跨进程互斥通过 profile 目录下的 `.train.lock` 实现；若锁已存在表示已有训练在进行中。
+- 当检测到锁已存在时，本脚本应以 exit code=2 退出（调度器据此“跳过本轮”，而非视为训练失败）。
+  - exit code=0: 训练完成
+  - exit code=1: 训练失败/异常
+  - exit code=2: 锁占用/已有训练进行中
 
 用法: python tools/train_fasttext_model_jieba.py <profile_name>
 """
 import sys
 import os
+import time
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,6 +25,39 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ai_proxy.moderation.smart.profile import ModerationProfile
 from ai_proxy.moderation.smart.fasttext_model_jieba import train_fasttext_model_jieba
 from ai_proxy.moderation.smart.storage import SampleStorage
+
+
+def _training_lock_path(profile: ModerationProfile) -> str:
+    return os.path.join(profile.base_dir, ".train.lock")
+
+
+def _acquire_file_lock(lock_path: str, stale_seconds: int = 24 * 3600) -> bool:
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            payload = f"pid={os.getpid()}\ncreated_at={int(time.time())}\n"
+            os.write(fd, payload.encode("utf-8", errors="replace"))
+        finally:
+            os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            mtime = os.path.getmtime(lock_path)
+            if (time.time() - mtime) > stale_seconds:
+                os.remove(lock_path)
+                return _acquire_file_lock(lock_path, stale_seconds=stale_seconds)
+        except Exception:
+            pass
+        return False
+
+
+def _release_file_lock(lock_path: str) -> None:
+    try:
+        os.remove(lock_path)
+    except FileNotFoundError:
+        return
+    except Exception:
+        return
 
 
 def main():
@@ -68,6 +111,12 @@ def main():
     
     # 开始训练
     print(f"开始训练（使用 jieba 分词）...\n")
+
+    lock_path = _training_lock_path(profile)
+    if not _acquire_file_lock(lock_path):
+        print(f"\n❌ 当前配置正在训练中（文件锁存在）: {lock_path}")
+        sys.exit(2)
+
     try:
         train_fasttext_model_jieba(profile)
         print(f"\n✅ 训练完成")
@@ -81,6 +130,8 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        _release_file_lock(lock_path)
 
 
 if __name__ == "__main__":
