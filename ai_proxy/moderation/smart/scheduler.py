@@ -246,8 +246,14 @@ async def train_all_profiles():
         try:
             profile = ModerationProfile(profile_name)
 
-            # 检查并清理过期锁
+            # 检查并清理过期锁（只清理死锁，不影响正常锁）
             check_stale_lock(profile)
+            
+            # 检查文件锁是否存在（如果存在说明有训练在进行）
+            lock_path = _training_lock_path(profile)
+            if os.path.exists(lock_path):
+                print(f"[SCHEDULER] {profile_name} 文件锁存在，跳过本次调度")
+                continue
 
             if not should_train(profile):
                 storage = SampleStorage(profile.get_db_path())
