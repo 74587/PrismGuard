@@ -201,9 +201,52 @@ def train_bow_model(profile: ModerationProfile):
     
     clf.fit(X, labels)
     
-    # 保存模型
-    joblib.dump(vectorizer, profile.get_vectorizer_path())
-    joblib.dump(clf, profile.get_model_path())
+    # 保存模型（使用临时文件 + 原子替换，避免产生不完整的模型文件）
+    vectorizer_path = profile.get_vectorizer_path()
+    model_path = profile.get_model_path()
+    temp_vectorizer_path = vectorizer_path + ".tmp"
+    temp_model_path = model_path + ".tmp"
+    
+    try:
+        # 先保存到临时文件
+        joblib.dump(vectorizer, temp_vectorizer_path)
+        joblib.dump(clf, temp_model_path)
+        
+        # 验证临时文件
+        if not os.path.exists(temp_vectorizer_path) or not os.path.exists(temp_model_path):
+            raise RuntimeError("模型保存失败：临时文件不存在")
+        
+        vec_size = os.path.getsize(temp_vectorizer_path)
+        model_size = os.path.getsize(temp_model_path)
+        if vec_size < 100 or model_size < 100:
+            raise RuntimeError(f"模型保存失败：文件过小 (vectorizer={vec_size}, model={model_size} bytes)")
+        
+        # 尝试加载临时文件验证完整性
+        test_vec = joblib.load(temp_vectorizer_path)
+        test_clf = joblib.load(temp_model_path)
+        test_X = test_vec.transform(["验证测试"])
+        _ = test_clf.predict_proba(test_X)
+        del test_vec, test_clf
+        
+        # 原子替换（Windows 上需要先删除目标文件）
+        if os.path.exists(vectorizer_path):
+            os.remove(vectorizer_path)
+        if os.path.exists(model_path):
+            os.remove(model_path)
+        os.rename(temp_vectorizer_path, vectorizer_path)
+        os.rename(temp_model_path, model_path)
+        
+        print(f"[BOW] 模型已保存: vectorizer={vec_size/1024:.1f}KB, model={model_size/1024:.1f}KB")
+        
+    except Exception as e:
+        # 清理临时文件
+        for tmp in [temp_vectorizer_path, temp_model_path]:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+        raise RuntimeError(f"模型保存失败: {e}")
     
     print(f"[BOW] 训练完成")
     
@@ -222,12 +265,35 @@ def _load_model_with_cache(profile: ModerationProfile) -> Tuple[object, object]:
     """
     加载模型（带缓存，避免重复加载和内存泄漏）
     
+    改进：
+    1. 添加文件大小检查
+    2. 加载失败时清理缓存并抛出明确异常
+    3. 验证模型能够正常工作
+    
     Returns:
         (vectorizer, clf)
+        
+    Raises:
+        FileNotFoundError: 模型文件不存在
+        RuntimeError: 模型文件损坏或无法加载
     """
     profile_name = profile.profile_name
     model_path = profile.get_model_path()
     vectorizer_path = profile.get_vectorizer_path()
+    
+    # 检查文件存在
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"模型文件不存在: {model_path}")
+    if not os.path.exists(vectorizer_path):
+        raise FileNotFoundError(f"向量化器文件不存在: {vectorizer_path}")
+    
+    # 检查文件大小（避免加载空文件或损坏文件）
+    model_size = os.path.getsize(model_path)
+    vectorizer_size = os.path.getsize(vectorizer_path)
+    if model_size < 100:  # 小于 100 bytes 认为是无效文件
+        raise RuntimeError(f"模型文件过小或损坏 ({model_size} bytes): {model_path}")
+    if vectorizer_size < 100:
+        raise RuntimeError(f"向量化器文件过小或损坏 ({vectorizer_size} bytes): {vectorizer_path}")
     
     # 获取文件修改时间
     model_mtime = os.path.getmtime(model_path)
@@ -248,8 +314,22 @@ def _load_model_with_cache(profile: ModerationProfile) -> Tuple[object, object]:
     
     # 加载模型
     print(f"[DEBUG] 加载模型文件: {profile_name}")
-    vectorizer = joblib.load(vectorizer_path)
-    clf = joblib.load(model_path)
+    try:
+        vectorizer = joblib.load(vectorizer_path)
+        clf = joblib.load(model_path)
+    except Exception as e:
+        # 清理可能的损坏缓存
+        if profile_name in _model_cache:
+            del _model_cache[profile_name]
+        raise RuntimeError(f"模型加载失败: {e}")
+    
+    # 验证模型能够正常工作
+    try:
+        test_text = "验证测试"
+        test_vec = vectorizer.transform([test_text])
+        _ = clf.predict_proba(test_vec)
+    except Exception as e:
+        raise RuntimeError(f"模型验证失败: {e}")
     
     # 保存到缓存
     _model_cache[profile_name] = (vectorizer, clf, model_mtime, vectorizer_mtime)

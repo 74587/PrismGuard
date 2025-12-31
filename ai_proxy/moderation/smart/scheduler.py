@@ -5,13 +5,19 @@
 - 子进程继承主进程 env（API Key 等环境变量无需重复配置）
 - 主进程不再承载训练期间的峰值内存，子进程退出后由 OS 回收
 - 跨进程互斥交给训练脚本的 .train.lock（避免父进程自锁）
+
+改进：
+- 添加训练状态检查，避免加载损坏的模型
+- 锁超时从 24 小时改为 2 小时
+- 检查锁持有进程是否存活
 """
 import os
 import sys
+import json
 import asyncio
 import time
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from ai_proxy.moderation.smart.profile import ModerationProfile, LocalModelType
 from ai_proxy.moderation.smart.storage import SampleStorage
@@ -25,6 +31,105 @@ def get_profile_lock(profile_name: str) -> asyncio.Lock:
     if profile_name not in _profile_locks:
         _profile_locks[profile_name] = asyncio.Lock()
     return _profile_locks[profile_name]
+
+
+def _training_status_path(profile: ModerationProfile) -> str:
+    """训练状态文件路径"""
+    return os.path.join(profile.base_dir, ".train_status.json")
+
+
+def _training_lock_path(profile: ModerationProfile) -> str:
+    """训练锁文件路径"""
+    return os.path.join(profile.base_dir, ".train.lock")
+
+
+def get_training_status(profile: ModerationProfile) -> Optional[Dict]:
+    """
+    获取训练状态
+    
+    Returns:
+        状态字典 {'status': 'completed'|'failed'|'started', 'timestamp': int, 'error': str|None}
+        如果状态文件不存在返回 None
+    """
+    status_path = _training_status_path(profile)
+    if not os.path.exists(status_path):
+        return None
+    
+    try:
+        with open(status_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def check_stale_lock(profile: ModerationProfile, stale_seconds: int = 2 * 3600) -> bool:
+    """
+    检查并清理过期的锁文件
+    
+    改进：
+    1. 默认超时从 24 小时改为 2 小时
+    2. 检查锁持有进程是否存活
+    
+    Returns:
+        True 如果锁被清理或不存在，False 如果锁有效
+    """
+    lock_path = _training_lock_path(profile)
+    
+    if not os.path.exists(lock_path):
+        return True
+    
+    try:
+        # 读取锁文件内容
+        with open(lock_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        lock_info = {}
+        for line in content.strip().split('\n'):
+            if '=' in line:
+                key, value = line.split('=', 1)
+                lock_info[key.strip()] = value.strip()
+        
+        lock_pid = int(lock_info.get('pid', 0))
+        lock_created = int(lock_info.get('created_at', 0))
+        
+        # 检查锁是否过期
+        if lock_created > 0 and (time.time() - lock_created) > stale_seconds:
+            print(f"[SCHEDULER] 锁已过期 ({(time.time() - lock_created) / 3600:.1f} 小时)，清理中...")
+            os.remove(lock_path)
+            return True
+        
+        # 检查持有锁的进程是否存活
+        if lock_pid > 0:
+            try:
+                if sys.platform == 'win32':
+                    import ctypes
+                    kernel32 = ctypes.windll.kernel32
+                    handle = kernel32.OpenProcess(0x1000, False, lock_pid)
+                    if handle:
+                        kernel32.CloseHandle(handle)
+                        # 进程存活，锁有效
+                        return False
+                    # 进程不存在
+                    print(f"[SCHEDULER] 锁持有进程 (PID={lock_pid}) 已不存在，清理中...")
+                    os.remove(lock_path)
+                    return True
+                else:
+                    os.kill(lock_pid, 0)
+                    # 进程存活，锁有效
+                    return False
+            except (OSError, ProcessLookupError):
+                # 进程不存在
+                print(f"[SCHEDULER] 锁持有进程 (PID={lock_pid}) 已不存在，清理中...")
+                os.remove(lock_path)
+                return True
+            except Exception:
+                pass
+        
+        return False
+        
+    except Exception as e:
+        print(f"[SCHEDULER] 检查锁状态时出错: {e}")
+        return False
 
 
 def _project_root_dir() -> str:
@@ -141,6 +246,9 @@ async def train_all_profiles():
         try:
             profile = ModerationProfile(profile_name)
 
+            # 检查并清理过期锁
+            check_stale_lock(profile)
+
             if not should_train(profile):
                 storage = SampleStorage(profile.get_db_path())
                 sample_count = storage.get_sample_count()
@@ -151,6 +259,15 @@ async def train_all_profiles():
             if lock.locked():
                 print(f"[SCHEDULER] {profile_name} 正在训练中（进程内锁），跳过本次调度")
                 continue
+
+            # 检查上次训练状态
+            last_status = get_training_status(profile)
+            if last_status and last_status.get('status') == 'failed':
+                last_time = last_status.get('timestamp', 0)
+                # 如果上次训练失败且在 30 分钟内，跳过（避免频繁重试）
+                if time.time() - last_time < 30 * 60:
+                    print(f"[SCHEDULER] {profile_name} 上次训练失败，等待冷却期...")
+                    continue
 
             model_type = profile.config.local_model_type
             print(f"[SCHEDULER] 开始训练: {profile_name} (模型类型={model_type.value})")

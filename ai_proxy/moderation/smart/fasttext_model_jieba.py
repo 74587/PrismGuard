@@ -160,10 +160,39 @@ def train_fasttext_model_jieba(profile: ModerationProfile):
             verbose=2
         )
         
-        # 保存模型
+        # 保存模型（使用临时文件 + 原子替换，避免产生不完整的模型文件）
         model_path = profile.get_fasttext_model_path()
-        model.save_model(model_path)
-        print(f"[FastText-Jieba] 模型已保存: {model_path}")
+        temp_model_path = model_path + ".tmp"
+        
+        # 先保存到临时文件
+        model.save_model(temp_model_path)
+        
+        # 验证临时文件
+        if not os.path.exists(temp_model_path):
+            raise RuntimeError("模型保存失败：临时文件不存在")
+        
+        temp_size = os.path.getsize(temp_model_path)
+        if temp_size < 1024:
+            os.remove(temp_model_path)
+            raise RuntimeError(f"模型保存失败：文件过小 ({temp_size} bytes)")
+        
+        # 尝试加载临时文件验证完整性
+        try:
+            test_model = fasttext.load_model(temp_model_path)
+            test_labels, _ = test_model.predict("验证测试", k=1)
+            if not test_labels:
+                raise RuntimeError("模型验证失败：预测返回空结果")
+            del test_model
+        except Exception as e:
+            os.remove(temp_model_path)
+            raise RuntimeError(f"模型验证失败：{e}")
+        
+        # 原子替换（Windows 上需要先删除目标文件）
+        if os.path.exists(model_path):
+            os.remove(model_path)
+        os.rename(temp_model_path, model_path)
+        
+        print(f"[FastText-Jieba] 模型已保存: {model_path} ({temp_size / 1024:.1f} KB)")
         
         # 评估
         result = model.test(train_file)
@@ -228,14 +257,28 @@ def _load_fasttext_with_cache(profile: ModerationProfile) -> fasttext.FastText:
     """
     加载 fastText 模型（带缓存）
     
+    改进：
+    1. 添加模型文件完整性检查
+    2. 加载失败时清理缓存并抛出明确异常
+    3. 验证模型能够正常预测
+    
     Returns:
         fastText 模型对象
+        
+    Raises:
+        FileNotFoundError: 模型文件不存在
+        RuntimeError: 模型文件损坏或无法加载
     """
     profile_name = profile.profile_name
     model_path = profile.get_fasttext_model_path()
     
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"fastText 模型不存在: {model_path}")
+    
+    # 检查文件大小（避免加载空文件或损坏文件）
+    file_size = os.path.getsize(model_path)
+    if file_size < 1024:  # 小于 1KB 认为是无效文件
+        raise RuntimeError(f"fastText 模型文件过小或损坏 ({file_size} bytes): {model_path}")
     
     # 获取文件修改时间
     model_mtime = os.path.getmtime(model_path)
@@ -253,7 +296,21 @@ def _load_fasttext_with_cache(profile: ModerationProfile) -> fasttext.FastText:
     
     # 加载模型
     print(f"[DEBUG] 加载 fastText 模型: {model_path}")
-    model = fasttext.load_model(model_path)
+    try:
+        model = fasttext.load_model(model_path)
+    except Exception as e:
+        # 清理可能的损坏缓存
+        if profile_name in _fasttext_cache:
+            del _fasttext_cache[profile_name]
+        raise RuntimeError(f"fastText 模型加载失败: {model_path}, 错误: {e}")
+    
+    # 验证模型能够正常工作
+    try:
+        labels, probs = model.predict("验证测试", k=1)
+        if not labels:
+            raise RuntimeError("模型预测返回空结果")
+    except Exception as e:
+        raise RuntimeError(f"fastText 模型验证失败: {model_path}, 错误: {e}")
     
     # 保存到缓存
     _fasttext_cache[profile_name] = (model, model_mtime)
