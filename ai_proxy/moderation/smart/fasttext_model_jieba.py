@@ -261,6 +261,7 @@ def _load_fasttext_with_cache(profile: ModerationProfile) -> fasttext.FastText:
     1. 添加模型文件完整性检查
     2. 加载失败时清理缓存并抛出明确异常
     3. 验证模型能够正常预测
+    4. 发现损坏模型时自动删除，以便下次调度器重新训练
     
     Returns:
         fastText 模型对象
@@ -278,6 +279,8 @@ def _load_fasttext_with_cache(profile: ModerationProfile) -> fasttext.FastText:
     # 检查文件大小（避免加载空文件或损坏文件）
     file_size = os.path.getsize(model_path)
     if file_size < 1024:  # 小于 1KB 认为是无效文件
+        print(f"[ERROR] fastText 模型文件过小，删除损坏文件: {model_path}")
+        _remove_corrupted_model(model_path)
         raise RuntimeError(f"fastText 模型文件过小或损坏 ({file_size} bytes): {model_path}")
     
     # 获取文件修改时间
@@ -302,6 +305,8 @@ def _load_fasttext_with_cache(profile: ModerationProfile) -> fasttext.FastText:
         # 清理可能的损坏缓存
         if profile_name in _fasttext_cache:
             del _fasttext_cache[profile_name]
+        print(f"[ERROR] fastText 模型加载失败，删除损坏文件: {model_path}")
+        _remove_corrupted_model(model_path)
         raise RuntimeError(f"fastText 模型加载失败: {model_path}, 错误: {e}")
     
     # 验证模型能够正常工作
@@ -310,12 +315,24 @@ def _load_fasttext_with_cache(profile: ModerationProfile) -> fasttext.FastText:
         if not labels:
             raise RuntimeError("模型预测返回空结果")
     except Exception as e:
+        print(f"[ERROR] fastText 模型验证失败，删除损坏文件: {model_path}")
+        _remove_corrupted_model(model_path)
         raise RuntimeError(f"fastText 模型验证失败: {model_path}, 错误: {e}")
     
     # 保存到缓存
     _fasttext_cache[profile_name] = (model, model_mtime)
     
     return model
+
+
+def _remove_corrupted_model(model_path: str) -> None:
+    """删除损坏的模型文件，以便调度器下次重新训练"""
+    try:
+        if os.path.exists(model_path):
+            os.remove(model_path)
+            print(f"[INFO] 已删除损坏的模型文件: {model_path}")
+    except Exception as e:
+        print(f"[WARNING] 无法删除损坏的模型文件: {model_path}, 错误: {e}")
 
 
 def fasttext_predict_proba_jieba(text: str, profile: ModerationProfile) -> float:

@@ -269,6 +269,7 @@ def _load_model_with_cache(profile: ModerationProfile) -> Tuple[object, object]:
     1. 添加文件大小检查
     2. 加载失败时清理缓存并抛出明确异常
     3. 验证模型能够正常工作
+    4. 发现损坏模型时自动删除，以便下次调度器重新训练
     
     Returns:
         (vectorizer, clf)
@@ -291,8 +292,12 @@ def _load_model_with_cache(profile: ModerationProfile) -> Tuple[object, object]:
     model_size = os.path.getsize(model_path)
     vectorizer_size = os.path.getsize(vectorizer_path)
     if model_size < 100:  # 小于 100 bytes 认为是无效文件
+        print(f"[ERROR] 模型文件过小，删除损坏文件: {model_path}")
+        _remove_corrupted_bow_model(profile)
         raise RuntimeError(f"模型文件过小或损坏 ({model_size} bytes): {model_path}")
     if vectorizer_size < 100:
+        print(f"[ERROR] 向量化器文件过小，删除损坏文件: {vectorizer_path}")
+        _remove_corrupted_bow_model(profile)
         raise RuntimeError(f"向量化器文件过小或损坏 ({vectorizer_size} bytes): {vectorizer_path}")
     
     # 获取文件修改时间
@@ -321,6 +326,8 @@ def _load_model_with_cache(profile: ModerationProfile) -> Tuple[object, object]:
         # 清理可能的损坏缓存
         if profile_name in _model_cache:
             del _model_cache[profile_name]
+        print(f"[ERROR] 模型加载失败，删除损坏文件")
+        _remove_corrupted_bow_model(profile)
         raise RuntimeError(f"模型加载失败: {e}")
     
     # 验证模型能够正常工作
@@ -329,12 +336,28 @@ def _load_model_with_cache(profile: ModerationProfile) -> Tuple[object, object]:
         test_vec = vectorizer.transform([test_text])
         _ = clf.predict_proba(test_vec)
     except Exception as e:
+        print(f"[ERROR] 模型验证失败，删除损坏文件")
+        _remove_corrupted_bow_model(profile)
         raise RuntimeError(f"模型验证失败: {e}")
     
     # 保存到缓存
     _model_cache[profile_name] = (vectorizer, clf, model_mtime, vectorizer_mtime)
     
     return vectorizer, clf
+
+
+def _remove_corrupted_bow_model(profile: ModerationProfile) -> None:
+    """删除损坏的 BoW 模型文件，以便调度器下次重新训练"""
+    model_path = profile.get_model_path()
+    vectorizer_path = profile.get_vectorizer_path()
+    
+    for path in [model_path, vectorizer_path]:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                print(f"[INFO] 已删除损坏的模型文件: {path}")
+        except Exception as e:
+            print(f"[WARNING] 无法删除损坏的模型文件: {path}, 错误: {e}")
 
 
 def bow_predict_proba(text: str, profile: ModerationProfile) -> float:
