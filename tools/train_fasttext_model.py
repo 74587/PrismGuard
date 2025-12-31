@@ -137,11 +137,12 @@ def _acquire_file_lock(lock_path: str, stale_seconds: int = 2 * 3600) -> bool:
     1. 默认超时从 24 小时改为 2 小时（训练通常不会这么久）
     2. 检查锁持有进程是否存活，如果进程已死则清理锁
     3. 记录更详细的锁信息
+    4. 如果锁是调度器创建的，子进程可以继承使用
     """
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         try:
-            payload = f"pid={os.getpid()}\ncreated_at={int(time.time())}\nhostname={os.environ.get('COMPUTERNAME', os.environ.get('HOSTNAME', 'unknown'))}\n"
+            payload = f"pid={os.getpid()}\ncreated_at={int(time.time())}\nhostname={os.environ.get('COMPUTERNAME', os.environ.get('HOSTNAME', 'unknown'))}\ntype=subprocess\n"
             os.write(fd, payload.encode("utf-8", errors="replace"))
         finally:
             os.close(fd)
@@ -152,6 +153,20 @@ def _acquire_file_lock(lock_path: str, stale_seconds: int = 2 * 3600) -> bool:
             lock_info = _parse_lock_file(lock_path)
             lock_pid = int(lock_info.get('pid', 0))
             lock_created = int(lock_info.get('created_at', 0))
+            lock_type = lock_info.get('type', '')
+            
+            # 如果锁是调度器创建的，检查调度器是否是我们的父进程
+            if lock_type == 'scheduler':
+                parent_pid = os.getppid()
+                if lock_pid == parent_pid:
+                    # 锁是父进程（调度器）创建的，更新锁信息并继续
+                    print(f"[LOCK] 继承调度器的锁 (父进程 PID={parent_pid})")
+                    try:
+                        with open(lock_path, 'w', encoding='utf-8') as f:
+                            f.write(f"pid={os.getpid()}\ncreated_at={int(time.time())}\nhostname={os.environ.get('COMPUTERNAME', os.environ.get('HOSTNAME', 'unknown'))}\ntype=subprocess\nparent_pid={parent_pid}\n")
+                        return True
+                    except Exception:
+                        pass
             
             # 检查锁是否过期
             if lock_created > 0 and (time.time() - lock_created) > stale_seconds:
