@@ -43,7 +43,7 @@ class InternalContentBlock(BaseModel):
 
 class InternalMessage(BaseModel):
     """统一消息格式"""
-    role: Literal["system", "user", "assistant", "tool"]
+    role: Literal["system", "user", "assistant", "tool", "developer"]
     content: List[InternalContentBlock]
 
 
