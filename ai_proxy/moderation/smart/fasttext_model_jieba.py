@@ -1,15 +1,18 @@
 """
-fastText 模型训练和预测模块（高级分词版本）
-支持多种分词方式：jieba、tiktoken、组合分词
+fastText 模型训练和预测模块（外部分词版本）
 
-分词模式：
+文件命名说明：
+- 文件名 `_jieba` 是历史遗留，实际支持 jieba、tiktoken 及组合分词
+- 与 `fasttext_model.py`（无分词版本）的区别：本模块使用外部分词器预处理文本
+
+分词模式（由配置 use_jieba / use_tiktoken 控制）：
 1. jieba only: 使用 jieba 中文分词
 2. tiktoken only: 使用 tiktoken BPE 分词
 3. tiktoken + jieba: 先 tiktoken 再 jieba（实验性）
 
-相比原版的改进：
-- 支持多种分词方式
-- 关闭子词 n-gram (minn=0, maxn=0)
+相比原版 fasttext_model.py 的改进：
+- 支持多种外部分词方式
+- 关闭 fastText 内置子词 n-gram (minn=0, maxn=0)
 - 使用词级 n-gram 提取特征
 - 使用 tqdm 显示分词进度
 """
