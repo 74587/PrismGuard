@@ -71,7 +71,9 @@ async def startup_event():
     print("[INFO] 内存守护后台任务已启动")
 
 async def memory_guard_loop():
-    """内存守护后台循环 - 定期检查所有追踪的容器 + 进程总内存"""
+    """内存守护后台循环 - 定期检查所有追踪的容器 + 进程总内存 + 释放空闲内存"""
+    from ai_proxy.utils.memory_guard import periodic_memory_cleanup
+    
     while True:
         try:
             await asyncio.sleep(30)  # 每30秒检查一次
@@ -83,6 +85,9 @@ async def memory_guard_loop():
             
             # 2. 检查进程总内存（兜底机制）
             check_process_memory()  # 如果超过2GB会自动退出
+            
+            # 3. 定期释放空闲内存给 OS（解决 glibc arena 不归还问题）
+            periodic_memory_cleanup()
             
         except asyncio.CancelledError:
             print("[MEMORY_GUARD] 后台任务已取消")

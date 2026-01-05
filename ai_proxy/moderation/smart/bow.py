@@ -22,6 +22,7 @@ from ai_proxy.moderation.smart.profile import (
 )
 from ai_proxy.moderation.smart.storage import SampleStorage
 from ai_proxy.moderation.smart.ai import ModerationResult
+from ai_proxy.utils.memory_guard import release_memory
 
 
 # 模型缓存：{profile_name: (vectorizer, clf, model_mtime, vectorizer_mtime)}
@@ -316,6 +317,8 @@ def _load_model_with_cache(profile: ModerationProfile) -> Tuple[object, object]:
             print(f"[DEBUG] 模型文件已更新，重新加载: {profile_name}")
             # 清理旧模型（帮助GC回收内存）
             del _model_cache[profile_name]
+            # 强制释放旧模型内存给 OS
+            release_memory()
     
     # 加载模型
     print(f"[DEBUG] 加载模型文件: {profile_name}")

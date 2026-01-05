@@ -13,6 +13,7 @@ import fasttext
 from typing import Dict, Tuple, Optional
 from ai_proxy.moderation.smart.profile import ModerationProfile, SampleLoadingStrategy
 from ai_proxy.moderation.smart.storage import SampleStorage
+from ai_proxy.utils.memory_guard import release_memory
 
 
 # 模型缓存：{profile_name: (model, model_mtime)}
@@ -225,6 +226,8 @@ def _load_fasttext_with_cache(profile: ModerationProfile) -> fasttext.FastText:
         else:
             print(f"[DEBUG] fastText 模型文件已更新，重新加载: {profile_name}")
             del _fasttext_cache[profile_name]
+            # 强制释放旧模型内存给 OS
+            release_memory()
     
     # 加载模型 (返回 FastText 对象，兼容新版 API)
     print(f"[DEBUG] 加载 fastText 模型: {model_path}")

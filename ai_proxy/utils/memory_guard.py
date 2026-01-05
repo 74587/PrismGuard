@@ -6,9 +6,49 @@ import sys
 import os
 import threading
 import weakref
+import ctypes
 import psutil
 from typing import Dict, List, Any, Optional
 from collections.abc import MutableMapping, MutableSequence
+
+
+def malloc_trim() -> bool:
+    """
+    调用 glibc 的 malloc_trim(0) 强制释放空闲内存给操作系统
+    
+    解决问题：Python/glibc 的内存分配器会保留已释放的内存在 arena 中，
+    导致 RSS 不下降、swap 持续增长。malloc_trim 强制归还这些内存。
+    
+    Returns:
+        是否成功调用
+    """
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        result = libc.malloc_trim(0)
+        return result == 1
+    except (OSError, AttributeError):
+        # 非 Linux 或 glibc 不可用
+        return False
+
+
+def release_memory() -> None:
+    """
+    强制释放内存：先 GC 回收 Python 对象，再调用 malloc_trim 归还给 OS
+    
+    适用场景：
+    - 模型更新后删除旧模型
+    - 大量临时对象处理完成后
+    - 定期内存清理
+    """
+    # 先执行 Python GC
+    gc.collect()
+    gc.collect()  # 多次调用确保循环引用被清理
+    
+    # 再调用 malloc_trim 归还给 OS
+    if malloc_trim():
+        print("[MEMORY] malloc_trim() 成功，空闲内存已归还 OS")
+    else:
+        print("[MEMORY] malloc_trim() 不可用（非 glibc 环境）")
 
 
 class MemoryGuard:
@@ -367,3 +407,13 @@ def check_process_memory() -> bool:
     """
     monitor = get_process_monitor()
     return monitor.check_and_force_exit()
+
+
+def periodic_memory_cleanup() -> None:
+    """
+    定期内存清理：GC + malloc_trim
+    
+    建议在后台循环中定期调用（如每 30-60 秒）
+    """
+    gc.collect()
+    malloc_trim()
