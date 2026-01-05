@@ -74,6 +74,12 @@ class FastTextTrainingConfig(BaseModel):
     minn: int = 2              # 子词最小长度（use_jieba/tiktoken=True 时自动设为 0）
     maxn: int = 4              # 子词最大长度（use_jieba/tiktoken=True 时自动设为 0）
     bucket: int = 200000       # hash 词表大小
+    
+    # 量化配置（大幅减少模型体积和内存占用）
+    quantize: bool = True      # 是否量化模型（推荐开启）
+    qnorm: bool = False        # 是否量化归一化向量
+    cutoff: int = 0            # 词表截断阈值（0=不截断）
+    retrain: bool = True       # 量化后是否重训练（提高精度）
 
 
 class VocabBucket(BaseModel):

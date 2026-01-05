@@ -89,6 +89,23 @@ def train_fasttext_model(profile: ModerationProfile):
             verbose=2
         )
         
+        # 量化模型（大幅减少体积和内存占用）
+        if cfg.quantize:
+            print(f"[FastText] 开始量化模型...")
+            print(f"  qnorm: {cfg.qnorm}")
+            print(f"  cutoff: {cfg.cutoff}")
+            print(f"  retrain: {cfg.retrain}")
+            
+            original_size_estimate = cfg.bucket * cfg.dim * 4 * 2  # 粗略估算
+            
+            model.quantize(
+                input=train_file,
+                qnorm=cfg.qnorm,
+                cutoff=cfg.cutoff,
+                retrain=cfg.retrain
+            )
+            print(f"[FastText] 量化完成")
+        
         # 保存模型（使用临时文件 + 原子替换，避免产生不完整的模型文件）
         model_path = profile.get_fasttext_model_path()
         temp_model_path = model_path + ".tmp"
