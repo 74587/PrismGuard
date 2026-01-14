@@ -5,6 +5,7 @@ import os
 import json
 import random
 import hashlib
+import asyncio
 import threading
 from collections import OrderedDict
 from typing import Tuple, Optional, Dict
@@ -15,6 +16,24 @@ from ai_proxy.config import settings
 from ai_proxy.moderation.smart.profile import get_profile, ModerationProfile
 from ai_proxy.moderation.smart.storage import SampleStorage
 from ai_proxy.utils.memory_guard import track_container, check_container
+
+
+# LLM 审核并发限制
+MAX_LLM_CONCURRENCY = 5
+_llm_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    """获取或创建 LLM 并发信号量"""
+    global _llm_semaphore
+    if _llm_semaphore is None:
+        _llm_semaphore = asyncio.Semaphore(MAX_LLM_CONCURRENCY)
+    return _llm_semaphore
+
+
+class LLMConcurrencyExceeded(Exception):
+    """LLM 并发数超限异常"""
+    pass
 
 
 def local_model_predict_proba(text: str, profile: ModerationProfile) -> float:
@@ -163,14 +182,39 @@ def _save_to_cache(profile_name: str, text: str, result: ModerationResult):
 
 
 async def ai_moderate(text: str, profile: ModerationProfile) -> ModerationResult:
-    """使用 AI 进行审核（复用客户端）"""
-    print(f"[MODERATION] AI审核开始")
-    print(f"  文本: {text[:100]}{'...' if len(text) > 100 else ''}")
+    """使用 AI 进行审核（复用客户端，带并发限制）
     
-    client = get_or_create_openai_client(profile)  # ✅ 复用客户端
-    prompt = profile.render_prompt(text)
+    Raises:
+        LLMConcurrencyExceeded: 当并发数超过限制时
+    """
+    semaphore = _get_llm_semaphore()
+    
+    # 尝试获取信号量，不等待
+    if not semaphore.locked() or semaphore._value > 0:
+        pass  # 有空位，继续
+    else:
+        # 检查是否能立即获取
+        if semaphore._value <= 0:
+            print(f"[MODERATION] LLM并发数已达上限({MAX_LLM_CONCURRENCY})，拒绝请求")
+            raise LLMConcurrencyExceeded(f"LLM审核并发数超限(max={MAX_LLM_CONCURRENCY})")
+    
+    # 使用 wait=False 尝试获取
+    acquired = False
+    try:
+        # 尝试非阻塞获取
+        await asyncio.wait_for(semaphore.acquire(), timeout=0.001)
+        acquired = True
+    except asyncio.TimeoutError:
+        print(f"[MODERATION] LLM并发数已达上限({MAX_LLM_CONCURRENCY})，拒绝请求")
+        raise LLMConcurrencyExceeded(f"LLM审核并发数超限(max={MAX_LLM_CONCURRENCY})")
     
     try:
+        print(f"[MODERATION] AI审核开始 (当前并发: {MAX_LLM_CONCURRENCY - semaphore._value}/{MAX_LLM_CONCURRENCY})")
+        print(f"  文本: {text[:100]}{'...' if len(text) > 100 else ''}")
+        
+        client = get_or_create_openai_client(profile)
+        prompt = profile.render_prompt(text)
+        
         response = await client.chat.completions.create(
             model=profile.config.ai.model,
             messages=[{"role": "user", "content": prompt}],
@@ -206,6 +250,8 @@ async def ai_moderate(text: str, profile: ModerationProfile) -> ModerationResult
             print(f"  原因: {result.reason[:100]}{'...' if len(result.reason) > 100 else ''}")
         return result
     
+    except LLMConcurrencyExceeded:
+        raise
     except Exception as e:
         import traceback
         print(f"\n{'='*60}")
@@ -216,10 +262,17 @@ async def ai_moderate(text: str, profile: ModerationProfile) -> ModerationResult
         traceback.print_exc()
         print(f"{'='*60}\n")
         raise
+    finally:
+        if acquired:
+            semaphore.release()
 
 
 async def run_ai_moderation_and_log(text: str, profile: ModerationProfile) -> ModerationResult:
-    """AI 审核并记录结果（先查数据库，避免重复调用AI）"""
+    """AI 审核并记录结果（先查数据库，避免重复调用AI）
+    
+    Raises:
+        LLMConcurrencyExceeded: 当并发数超过限制时（不计入数据库）
+    """
     storage = SampleStorage(profile.get_db_path())
     
     # 先查数据库，如果已有记录则直接返回
@@ -236,11 +289,11 @@ async def run_ai_moderation_and_log(text: str, profile: ModerationProfile) -> Mo
         print(f"[MODERATION] 数据库结果: {'❌ 违规' if result.violation else '✅ 通过'}")
         return result
     
-    # 数据库没有，调用AI审核
+    # 数据库没有，调用AI审核（可能抛出 LLMConcurrencyExceeded）
     print(f"[DEBUG] 数据库未命中，调用AI审核")
     result = await ai_moderate(text, profile)
     
-    # 保存到数据库
+    # 只有成功完成审核才保存到数据库
     label = 1 if result.violation else 0
     storage.save_sample(text, label, result.category)
     print(f"[DEBUG] 审核结果已保存到数据库")
@@ -258,6 +311,9 @@ async def smart_moderation(text: str, cfg: dict) -> Tuple[bool, Optional[Moderat
     2. 本地词袋模型 -> 低风险放行 / 高风险拒绝 / 中间交 AI
     3. 无模型 -> 全部交 AI
     4. 保存结果到缓存
+    
+    Raises:
+        LLMConcurrencyExceeded: 当 LLM 并发数超限时（不计入数据库）
     """
     if not cfg.get("enabled", False):
         print(f"[DEBUG] 智能审核: 未启用，跳过")
@@ -290,6 +346,7 @@ async def smart_moderation(text: str, cfg: dict) -> Tuple[bool, Optional[Moderat
     # 1. 随机抽样：直接走 AI（用于持续产生标注）
     if rand_val < ai_rate:
         print(f"[DEBUG] 决策路径: 随机抽样 (rand={rand_val:.3f} < {ai_rate:.3f}) -> AI审核")
+        # LLMConcurrencyExceeded 会向上抛出，不缓存、不入库
         result = await run_ai_moderation_and_log(text, profile)
         _save_to_cache(profile_name, text, result)
         return not result.violation, result
@@ -333,10 +390,14 @@ async def smart_moderation(text: str, cfg: dict) -> Tuple[bool, Optional[Moderat
             
             # 不确定：交给 AI 复核
             print(f"[DEBUG] 本地模型结果: ⚠️ 不确定 -> AI复核")
+            # LLMConcurrencyExceeded 会向上抛出
             result = await run_ai_moderation_and_log(text, profile)
             _save_to_cache(profile_name, text, result)
             return not result.violation, result
             
+        except LLMConcurrencyExceeded:
+            # 并发超限，直接向上抛出
+            raise
         except Exception as e:
             import traceback
             error_msg = str(e)
@@ -360,6 +421,7 @@ async def smart_moderation(text: str, cfg: dict) -> Tuple[bool, Optional[Moderat
         print(f"[DEBUG] 决策路径: 无本地模型 -> AI审核")
     
     # 3. 无模型或失败：全部交 AI
+    # LLMConcurrencyExceeded 会向上抛出
     result = await run_ai_moderation_and_log(text, profile)
     _save_to_cache(profile_name, text, result)
     return not result.violation, result

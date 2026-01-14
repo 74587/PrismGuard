@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from ai_proxy.moderation.basic import basic_moderation
-from ai_proxy.moderation.smart.ai import smart_moderation
+from ai_proxy.moderation.smart.ai import smart_moderation, LLMConcurrencyExceeded
 from ai_proxy.transform.extractor import extract_text_from_internal
 from ai_proxy.transform.formats.parser import detect_and_parse, get_parser
 from ai_proxy.transform.formats.internal_models import InternalChatRequest
@@ -109,7 +109,11 @@ async def _process_request_impl(
 
         # 智能审核
         if config.get("smart_moderation", {}).get("enabled"):
-            passed, result = await smart_moderation(text, config["smart_moderation"])
+            try:
+                passed, result = await smart_moderation(text, config["smart_moderation"])
+            except LLMConcurrencyExceeded as e:
+                print(f"[DEBUG] ========== 请求被拒绝（LLM并发超限） ==========\n")
+                return False, str(e), {"source": "concurrency_limit"}, None, None
             if not passed:
                 print(f"[DEBUG] ========== 请求被拒绝（智能审核） ==========\n")
                 # 构建详细错误信息
@@ -176,7 +180,11 @@ async def _process_request_impl(
 
     # 智能审核
     if config.get("smart_moderation", {}).get("enabled"):
-        passed, result = await smart_moderation(text, config["smart_moderation"])
+        try:
+            passed, result = await smart_moderation(text, config["smart_moderation"])
+        except LLMConcurrencyExceeded as e:
+            print(f"[DEBUG] ========== 请求被拒绝（LLM并发超限） ==========\n")
+            return False, str(e), {"source": "concurrency_limit"}, src_format, internal_req
         if not passed:
             print(f"[DEBUG] ========== 请求被拒绝（智能审核） ==========\n")
             # 构建详细错误信息
