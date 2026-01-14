@@ -98,7 +98,7 @@ def train_fasttext_model_jieba(profile: ModerationProfile):
     # 降低训练进程优先级，避免影响主服务
     try:
         original_nice = os.nice(0)
-        os.nice(10)
+        os.nice(19)
         print(f"[FastText-Jieba] 训练进程优先级已调整 (nice: {original_nice} -> {os.nice(0)})")
     except Exception as e:
         print(f"[FastText-Jieba] 无法调整进程优先级: {e}")
