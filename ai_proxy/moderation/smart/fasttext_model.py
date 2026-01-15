@@ -164,16 +164,33 @@ def _prepare_training_file(samples, profile: ModerationProfile) -> str:
     Returns:
         训练文件路径
     """
+    import time
+    
     # 创建临时文件
     fd, train_file = tempfile.mkstemp(suffix=".txt", prefix="fasttext_train_")
     
+    total = len(samples)
+    start_time = time.time()
+    last_print_time = start_time
+    
+    print(f"[FastText] 开始准备训练文件...")
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        for sample in samples:
+        for i, sample in enumerate(samples):
             # fastText 格式: __label__<类别> <文本>
             # 文本需要预处理: 去除换行符
             text = sample.text.replace('\n', ' ').replace('\r', ' ')
             label = sample.label  # 0 或 1
             f.write(f"__label__{label} {text}\n")
+            
+            # 每 500 条或每 5 秒输出一次进度
+            current_time = time.time()
+            if (i + 1) % 500 == 0 or (current_time - last_print_time) >= 5 or (i + 1) == total:
+                elapsed = current_time - start_time
+                rate = (i + 1) / elapsed if elapsed > 0 else 0
+                eta = (total - i - 1) / rate if rate > 0 else 0
+                print(f"  准备进度: {i + 1}/{total} ({(i + 1) / total * 100:.1f}%) | "
+                      f"速度: {rate:.1f} 样本/秒 | ETA: {eta:.1f}s")
+                last_print_time = current_time
     
     print(f"[FastText] 训练文件已生成: {train_file}")
     return train_file

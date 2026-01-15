@@ -154,15 +154,31 @@ def train_bow_model(profile: ModerationProfile):
     print(f"[BOW] 开始训练，共 {len(samples)} 个样本")
     
     # 文本预处理和分词 + 统计文档频率
+    import time
     use_char_ngram = cfg.use_char_ngram
     corpus = []
     doc_freqs = Counter()
     
-    for text in texts:
+    total = len(texts)
+    start_time = time.time()
+    last_print_time = start_time
+    
+    print(f"[BOW] 开始分词...")
+    for i, text in enumerate(texts):
         tokenized = tokenize_for_bow(text, use_char_ngram)
         corpus.append(tokenized)
         tokens = tokenized.split()
         doc_freqs.update(set(tokens))
+        
+        # 每 500 条或每 5 秒输出一次进度
+        current_time = time.time()
+        if (i + 1) % 500 == 0 or (current_time - last_print_time) >= 5 or (i + 1) == total:
+            elapsed = current_time - start_time
+            rate = (i + 1) / elapsed if elapsed > 0 else 0
+            eta = (total - i - 1) / rate if rate > 0 else 0
+            print(f"  分词进度: {i + 1}/{total} ({(i + 1) / total * 100:.1f}%) | "
+                  f"速度: {rate:.1f} 样本/秒 | ETA: {eta:.1f}s")
+            last_print_time = current_time
     
     # 构建 TF-IDF 向量化器
     word_ngram = cfg.word_ngram_range
