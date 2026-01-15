@@ -76,6 +76,12 @@ def train_fasttext_model(profile: ModerationProfile):
         print(f"  词级 n-gram: {cfg.word_ngrams}")
         print(f"  字符级 n-gram: [{cfg.minn}, {cfg.maxn}]")
         
+        print(f"[FastText] 开始训练模型...")
+        # 使用文件描述符级别的重定向捕获 C 库输出
+        import sys
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
         model = fasttext.train_supervised(
             input=train_file,
             dim=cfg.dim,
@@ -86,9 +92,11 @@ def train_fasttext_model(profile: ModerationProfile):
             maxn=cfg.maxn,
             bucket=cfg.bucket,
             loss="ova",  # one-vs-all，适合二分类
-            thread=2,  # 限制为单线程，降低 CPU 使用率
+            thread=2,  # 限制线程数，降低 CPU 使用率
             verbose=2
         )
+        
+        print(f"[FastText] 模型训练完成")
         
         # 量化模型（大幅减少体积和内存占用）
         if cfg.quantize:

@@ -17,6 +17,7 @@ import os
 import time
 import json
 import fcntl
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -38,33 +39,74 @@ def _log_path(profile: ModerationProfile) -> str:
     return os.path.join(profile.base_dir, "train.log")
 
 
-class TeeWriter:
-    """同时写入多个输出流，支持 tqdm 等需要 isatty 的库"""
-    def __init__(self, *writers):
-        self.writers = writers
+class FDTee:
+    """
+    文件描述符级别的 Tee，可以捕获 C 库的输出
+    """
+    def __init__(self, log_file, fd_num):
+        """
+        fd_num: 1 for stdout, 2 for stderr
+        """
+        self.log_file = log_file
+        self.fd_num = fd_num
+        self.original_fd = None
+        self.pipe_read = None
+        self.pipe_write = None
+        self.reader_thread = None
+        self.running = False
     
-    def write(self, text):
-        for w in self.writers:
+    def start(self):
+        import threading
+        
+        # 保存原始文件描述符
+        self.original_fd = os.dup(self.fd_num)
+        
+        # 创建管道
+        self.pipe_read, self.pipe_write = os.pipe()
+        
+        # 将目标 fd 重定向到管道写端
+        os.dup2(self.pipe_write, self.fd_num)
+        
+        # 启动读取线程
+        self.running = True
+        self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self.reader_thread.start()
+    
+    def _reader_loop(self):
+        """读取管道并同时写入原始 fd 和日志文件"""
+        while self.running:
             try:
-                w.write(text)
-                w.flush()
+                data = os.read(self.pipe_read, 4096)
+                if not data:
+                    break
+                # 写入原始输出（控制台）
+                os.write(self.original_fd, data)
+                # 写入日志文件
+                try:
+                    self.log_file.write(data.decode('utf-8', errors='replace'))
+                    self.log_file.flush()
+                except Exception:
+                    pass
             except Exception:
-                pass
+                break
     
-    def flush(self):
-        for w in self.writers:
-            try:
-                w.flush()
-            except Exception:
-                pass
-    
-    def isatty(self):
-        # 返回 False 让 tqdm 使用简单模式输出
-        return False
-    
-    def fileno(self):
-        # 返回第一个 writer 的 fileno（通常是原始 stdout/stderr）
-        return self.writers[0].fileno()
+    def stop(self):
+        self.running = False
+        
+        # 恢复原始文件描述符
+        if self.original_fd is not None:
+            os.dup2(self.original_fd, self.fd_num)
+            os.close(self.original_fd)
+        
+        # 关闭管道
+        if self.pipe_write is not None:
+            os.close(self.pipe_write)
+        if self.pipe_read is not None:
+            os.close(self.pipe_read)
+        
+        # 等待读取线程结束
+        if self.reader_thread is not None:
+            self.reader_thread.join(timeout=1)
 
 
 def _save_status(profile: ModerationProfile, status: str, error: str = None):
@@ -112,20 +154,13 @@ def main():
     log_path = _log_path(profile)
     log_file = open(log_path, 'w', encoding='utf-8')
     
-    # 创建 Tee 写入器，同时输出到控制台和日志文件
-    tee_out = TeeWriter(sys.stdout, log_file)
-    tee_err = TeeWriter(sys.stderr, log_file)
-    
-    # 保存原始 stdout/stderr
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
+    # 使用文件描述符级别的 Tee 捕获 C 库输出
+    stdout_tee = FDTee(log_file, 1)  # stdout
+    stderr_tee = FDTee(log_file, 2)  # stderr
+    stdout_tee.start()
+    stderr_tee.start()
     
     try:
-        # 重定向输出
-        sys.stdout = tee_out
-        sys.stderr = tee_err
-        
-        from datetime import datetime
         start_time = datetime.now()
         print(f"{'='*50}")
         print(f"fastText 训练 (jieba): {profile_name}")
@@ -165,9 +200,9 @@ def main():
         traceback.print_exc()
         sys.exit(1)
     finally:
-        # 恢复原始 stdout/stderr
-        sys.stdout = original_stdout
-        sys.stderr = original_stderr
+        # 停止文件描述符 Tee
+        stdout_tee.stop()
+        stderr_tee.stop()
         
         # 关闭日志文件
         log_file.close()
