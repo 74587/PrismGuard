@@ -17,6 +17,7 @@ fastText 模型训练和预测模块（外部分词版本）
 - 使用 tqdm 显示分词进度
 """
 import os
+import sys
 import tempfile
 import fasttext
 import jieba
@@ -257,7 +258,9 @@ def _prepare_training_file_jieba(samples, profile: ModerationProfile) -> str:
     print(f"[FastText-Advanced] 开始分词: {mode_desc}")
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
         # 使用 tqdm 显示分词进度
-        for sample in tqdm(samples, desc=mode_desc, unit="样本"):
+        # 显式传入 file=sys.stderr 确保使用重定向后的 stderr
+        # 设置 disable=False 确保在非 TTY 环境下也输出进度
+        for sample in tqdm(samples, desc=mode_desc, unit="样本", file=sys.stderr, disable=False):
             # 预处理文本
             text = sample.text.replace('\n', ' ').replace('\r', ' ')
             
