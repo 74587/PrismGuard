@@ -73,18 +73,32 @@ def _validate_model(model_path: str) -> bool:
 
 
 class TeeWriter:
-    """同时写入多个输出流"""
+    """同时写入多个输出流，支持 tqdm 等需要 isatty 的库"""
     def __init__(self, *writers):
         self.writers = writers
     
     def write(self, text):
         for w in self.writers:
-            w.write(text)
-            w.flush()
+            try:
+                w.write(text)
+                w.flush()
+            except Exception:
+                pass
     
     def flush(self):
         for w in self.writers:
-            w.flush()
+            try:
+                w.flush()
+            except Exception:
+                pass
+    
+    def isatty(self):
+        # 返回 False 让 tqdm 使用简单模式输出
+        return False
+    
+    def fileno(self):
+        # 返回第一个 writer 的 fileno（通常是原始 stdout/stderr）
+        return self.writers[0].fileno()
 
 
 def main():
