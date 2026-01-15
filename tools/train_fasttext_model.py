@@ -115,6 +115,7 @@ class FDTee:
         self.reader_thread = None
         self.running = False
         self.last_cr_log_time = 0  # 上次记录含 \r 内容的时间
+        self.line_buffer = ""  # 行缓冲区
     
     def start(self):
         import threading
@@ -142,27 +143,36 @@ class FDTee:
                     break
                 # 写入原始输出（控制台）
                 os.write(self.original_fd, data)
-                # 写入日志文件（对含 \r 的高频输出限流）
+                # 写入日志文件（处理高频 \r 刷新）
                 try:
                     text = data.decode('utf-8', errors='replace')
-                    current_time = time.time()
-                    
-                    # 检查是否包含 \r（高频刷新的进度输出）
-                    if '\r' in text and '\n' not in text:
-                        # 含 \r 但不含 \n 的输出，每秒最多记录一次
-                        if current_time - self.last_cr_log_time >= 1.0:
-                            # 将 \r 替换为 \n 以便在日志中可读
-                            self.log_file.write(text.replace('\r', '\n'))
-                            self.log_file.flush()
-                            self.last_cr_log_time = current_time
-                    else:
-                        # 正常输出，直接写入
-                        self.log_file.write(text)
-                        self.log_file.flush()
+                    self._process_for_log(text)
                 except Exception:
                     pass
             except Exception:
                 break
+    
+    def _process_for_log(self, text):
+        """处理文本并写入日志，对 \\r 刷新的进度行限流"""
+        current_time = time.time()
+        
+        for char in text:
+            if char == '\r':
+                # 遇到 \r，检查是否需要记录当前行
+                if self.line_buffer and current_time - self.last_cr_log_time >= 1.0:
+                    self.log_file.write(self.line_buffer + '\n')
+                    self.log_file.flush()
+                    self.last_cr_log_time = current_time
+                # 清空缓冲区（模拟覆盖行为）
+                self.line_buffer = ""
+            elif char == '\n':
+                # 遇到 \n，直接输出完整行
+                self.log_file.write(self.line_buffer + '\n')
+                self.log_file.flush()
+                self.line_buffer = ""
+            else:
+                # 普通字符，加入缓冲区
+                self.line_buffer += char
     
     def stop(self):
         self.running = False
@@ -177,6 +187,14 @@ class FDTee:
             os.close(self.pipe_write)
         if self.pipe_read is not None:
             os.close(self.pipe_read)
+        
+        # 输出剩余缓冲区内容
+        if self.line_buffer:
+            try:
+                self.log_file.write(self.line_buffer + '\n')
+                self.log_file.flush()
+            except Exception:
+                pass
         
         # 等待读取线程结束
         if self.reader_thread is not None:
