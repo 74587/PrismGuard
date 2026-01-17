@@ -21,8 +21,8 @@ def get_or_create_client(base_url: str) -> httpx.AsyncClient:
         _client_pool[base_url] = httpx.AsyncClient(
             timeout=60.0,
             limits=httpx.Limits(
-                max_keepalive_connections=20,
-                max_connections=100,
+                max_keepalive_connections=200,
+                max_connections=1000,
                 keepalive_expiry=30.0
             )
         )
