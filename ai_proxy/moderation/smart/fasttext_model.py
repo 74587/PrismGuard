@@ -77,7 +77,6 @@ def train_fasttext_model(profile: ModerationProfile):
         print(f"  字符级 n-gram: [{cfg.minn}, {cfg.maxn}]")
         
         print(f"[FastText] 开始训练模型...")
-        # 使用文件描述符级别的重定向捕获 C 库输出
         import sys
         sys.stdout.flush()
         sys.stderr.flush()

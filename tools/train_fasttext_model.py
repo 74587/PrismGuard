@@ -15,9 +15,7 @@ import os
 import time
 import json
 import fcntl
-import io
 from datetime import datetime
-from contextlib import redirect_stdout, redirect_stderr
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -72,135 +70,6 @@ def _validate_model(model_path: str) -> bool:
         return False
 
 
-class TeeWriter:
-    """同时写入多个输出流"""
-    def __init__(self, *writers):
-        self.writers = writers
-    
-    def write(self, text):
-        for w in self.writers:
-            try:
-                w.write(text)
-                w.flush()
-            except Exception:
-                pass
-    
-    def flush(self):
-        for w in self.writers:
-            try:
-                w.flush()
-            except Exception:
-                pass
-    
-    def isatty(self):
-        return False
-    
-    def fileno(self):
-        return self.writers[0].fileno()
-
-
-class FDTee:
-    """
-    文件描述符级别的 Tee，可以捕获 C 库的输出
-    """
-    def __init__(self, log_file, fd_num):
-        """
-        fd_num: 1 for stdout, 2 for stderr
-        """
-        self.log_file = log_file
-        self.fd_num = fd_num
-        self.original_fd = None
-        self.pipe_read = None
-        self.pipe_write = None
-        self.reader_thread = None
-        self.running = False
-        self.last_cr_log_time = 0  # 上次记录含 \r 内容的时间
-        self.line_buffer = ""  # 行缓冲区
-    
-    def start(self):
-        import threading
-        
-        # 保存原始文件描述符
-        self.original_fd = os.dup(self.fd_num)
-        
-        # 创建管道
-        self.pipe_read, self.pipe_write = os.pipe()
-        
-        # 将目标 fd 重定向到管道写端
-        os.dup2(self.pipe_write, self.fd_num)
-        
-        # 启动读取线程
-        self.running = True
-        self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
-        self.reader_thread.start()
-    
-    def _reader_loop(self):
-        """读取管道并同时写入原始 fd 和日志文件"""
-        while self.running:
-            try:
-                data = os.read(self.pipe_read, 4096)
-                if not data:
-                    break
-                # 写入原始输出（控制台）
-                os.write(self.original_fd, data)
-                # 写入日志文件（处理高频 \r 刷新）
-                try:
-                    text = data.decode('utf-8', errors='replace')
-                    self._process_for_log(text)
-                except Exception:
-                    pass
-            except Exception:
-                break
-    
-    def _process_for_log(self, text):
-        """处理文本并写入日志，对 \\r 刷新的进度行限流"""
-        current_time = time.time()
-        
-        for char in text:
-            if char == '\r':
-                # 遇到 \r，检查是否需要记录当前行
-                if self.line_buffer and current_time - self.last_cr_log_time >= 1.0:
-                    self.log_file.write(self.line_buffer + '\n')
-                    self.log_file.flush()
-                    self.last_cr_log_time = current_time
-                # 清空缓冲区（模拟覆盖行为）
-                self.line_buffer = ""
-            elif char == '\n':
-                # 遇到 \n，直接输出完整行
-                self.log_file.write(self.line_buffer + '\n')
-                self.log_file.flush()
-                self.line_buffer = ""
-            else:
-                # 普通字符，加入缓冲区
-                self.line_buffer += char
-    
-    def stop(self):
-        self.running = False
-        
-        # 恢复原始文件描述符
-        if self.original_fd is not None:
-            os.dup2(self.original_fd, self.fd_num)
-            os.close(self.original_fd)
-        
-        # 关闭管道
-        if self.pipe_write is not None:
-            os.close(self.pipe_write)
-        if self.pipe_read is not None:
-            os.close(self.pipe_read)
-        
-        # 输出剩余缓冲区内容
-        if self.line_buffer:
-            try:
-                self.log_file.write(self.line_buffer + '\n')
-                self.log_file.flush()
-            except Exception:
-                pass
-        
-        # 等待读取线程结束
-        if self.reader_thread is not None:
-            self.reader_thread.join(timeout=1)
-
-
 def main():
     if len(sys.argv) < 2:
         print("用法: python tools/train_fasttext_model.py <profile_name>")
@@ -225,15 +94,17 @@ def main():
             lock_file.close()
         sys.exit(2)
     
-    # 打开日志文件
+    # 打开日志文件，直接重定向 stdout/stderr（不用管道，避免 GIL 问题）
     log_path = _log_path(profile)
-    log_file = open(log_path, 'w', encoding='utf-8')
+    log_file = open(log_path, 'w', encoding='utf-8', buffering=1)  # 行缓冲
     
-    # 使用文件描述符级别的 Tee 捕获 C 库输出
-    stdout_tee = FDTee(log_file, 1)  # stdout
-    stderr_tee = FDTee(log_file, 2)  # stderr
-    stdout_tee.start()
-    stderr_tee.start()
+    # 保存原始 stdout/stderr
+    original_stdout_fd = os.dup(1)
+    original_stderr_fd = os.dup(2)
+    
+    # 重定向到日志文件
+    os.dup2(log_file.fileno(), 1)
+    os.dup2(log_file.fileno(), 2)
     
     try:
         start_time = datetime.now()
@@ -241,15 +112,18 @@ def main():
         print(f"fastText 训练: {profile_name}")
         print(f"开始时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*50}")
+        sys.stdout.flush()
         
         cfg = profile.config.fasttext_training
         storage = SampleStorage(profile.get_db_path())
         sample_count = storage.get_sample_count()
         
         print(f"样本数: {sample_count}, 最小要求: {cfg.min_samples}")
+        sys.stdout.flush()
         
         if sample_count < cfg.min_samples:
             print(f"样本不足，跳过")
+            sys.stdout.flush()
             lock_file.close()
             log_file.close()
             sys.exit(1)
@@ -261,6 +135,7 @@ def main():
         else:
             train_func = train_fasttext_model
             print(f"分词模式: 字符级 n-gram")
+        sys.stdout.flush()
         
         _save_status(profile, 'started')
         
@@ -279,17 +154,21 @@ def main():
         print(f"结束时间: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"耗时: {duration:.1f} 秒")
         print(f"{'='*50}")
+        sys.stdout.flush()
         
     except Exception as e:
         _save_status(profile, 'failed', str(e))
         print(f"\n❌ 训练失败: {e}")
         import traceback
         traceback.print_exc()
+        sys.stdout.flush()
         sys.exit(1)
     finally:
-        # 停止文件描述符 Tee
-        stdout_tee.stop()
-        stderr_tee.stop()
+        # 恢复原始 stdout/stderr
+        os.dup2(original_stdout_fd, 1)
+        os.dup2(original_stderr_fd, 2)
+        os.close(original_stdout_fd)
+        os.close(original_stderr_fd)
         
         # 关闭日志文件
         log_file.close()
