@@ -81,10 +81,15 @@ class ModerationResult(BaseModel):
 
 
 # LRU 缓存池：每个配置一个缓存
+# 缓存 key 使用文本的 md5（见 _get_text_hash()），避免直接用原文占用过多内存
 _moderation_cache: Dict[str, OrderedDict] = {}
 _cache_lock = threading.Lock()
-CACHE_SIZE = 20
-MAX_PROFILES = 50  # ✅ 限制最大配置数量
+
+# 单个 profile 的 LRU 缓存容量（键数量）
+CACHE_SIZE = 1024
+
+# ✅ 限制最大配置数量（避免 profile 过多导致缓存池无限增长）
+MAX_PROFILES = 50
 
 
 # 全局 OpenAI 客户端池

@@ -171,11 +171,11 @@ def detect_and_parse(
     headers: Dict[str, str],
     body: Dict[str, Any],
     strict_parse: bool = False,
-    disable_tools: bool = False
+    disable_tools: bool = False,
 ) -> Tuple[Optional[str], Optional[InternalChatRequest], Optional[str]]:
     """
     检测并解析请求格式
-    
+
     Args:
         config_from: 配置的来源格式，可以是：
             - str: 单一格式名称
@@ -185,8 +185,8 @@ def detect_and_parse(
         headers: 请求头
         body: 请求体
         strict_parse: 是否启用严格解析模式
-        disable_tools: 是否禁用工具调用（如果启用，将拒绝包含工具的请求）
-    
+        disable_tools: 是否禁用工具调用
+
     Returns:
         (格式名称, 内部请求对象, 错误消息) 或 (None, None, 错误消息) 表示无法识别
     """
@@ -223,17 +223,11 @@ def detect_and_parse(
         try:
             if parser.can_parse(path, headers, body):
                 internal = parser.from_format(body)
-                
-                # 如果禁用工具，检查请求中是否包含工具
+
+                # disable_tools=true 时不再报错拒绝：直接过滤掉 tools / tool_choice / tool call / tool result
                 if disable_tools:
-                    has_tools = _check_has_tools(internal)
-                    if has_tools:
-                        return None, None, (
-                            f"Tool calling is disabled by configuration. "
-                            f"The request contains tool definitions or tool-related content, which is not allowed. "
-                            f"Please remove 'tools', 'tool_choice', tool calls, or tool results from your request."
-                        )
-                
+                    internal = _filter_tools(internal)
+
                 return name, internal, None
         except Exception as e:
             # 解析失败，记录错误并继续尝试下一个
@@ -287,28 +281,40 @@ def detect_and_parse(
     return None, None, None
 
 
-def _check_has_tools(internal: InternalChatRequest) -> bool:
+def _filter_tools(internal: InternalChatRequest) -> InternalChatRequest:
     """
-    检查内部请求是否包含工具相关内容
+    过滤掉工具相关内容，保证 disable_tools=true 时请求仍可继续被解析/转发。
+
+    过滤范围：
+    - request.tools → 设为 []（转换时不会输出 tools 字段）
+    - request.tool_choice → 设为 None（转换时不会输出 tool_choice 字段）
+    - message.content 中的 tool_call / tool_result 块 → 删除
+    - role == "tool" 的消息（仅包含工具结果语义）→ 完全丢弃
     
-    Returns:
-        True 如果包含工具定义、工具调用或工具结果
+    注意：所有格式转换器（openai_chat、claude_chat、openai_responses）都使用条件判断
+    （if tools: / if tool_choice is not None:）来决定是否添加这些字段，
+    因此设为空值后，转换后的请求体中将不包含这些字段。
     """
-    # 检查是否有工具定义
-    if internal.tools:
-        return True
-    
-    # 检查 tool_choice
-    if internal.tool_choice is not None:
-        return True
-    
-    # 检查消息中是否包含工具调用或工具结果
+    cleaned_messages = []
     for msg in internal.messages:
-        for block in msg.content:
-            if block.type in ["tool_call", "tool_result"]:
-                return True
-    
-    return False
+        if msg.role == "tool":
+            continue
+
+        cleaned_blocks = [b for b in msg.content if b.type not in ["tool_call", "tool_result"]]
+        if not cleaned_blocks:
+            # 保持消息结构有效：至少保留一个空文本块
+            from ai_proxy.transform.formats.internal_models import InternalContentBlock
+            cleaned_blocks = [InternalContentBlock(type="text", text="")]
+
+        cleaned_messages.append(msg.model_copy(update={"content": cleaned_blocks}))
+
+    return internal.model_copy(
+        update={
+            "tools": [],
+            "tool_choice": None,
+            "messages": cleaned_messages,
+        }
+    )
 
 
 def get_parser(format_name: str) -> Optional[FormatParser]:

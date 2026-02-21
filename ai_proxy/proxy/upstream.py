@@ -5,7 +5,7 @@ import httpx
 import json
 import gzip
 from typing import Optional, Dict, Any, AsyncIterator
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 from ai_proxy.utils.memory_guard import check_container
 from ai_proxy.proxy.stream_checker import StreamChecker, check_response_content
 from ai_proxy.proxy.stream_transformer import create_stream_transformer
@@ -103,14 +103,36 @@ class UpstreamClient:
                 print(f"[UPSTREAM] Upstream Content-Encoding: {response.headers.get('content-encoding', 'None')}")
                 
                 if response.status_code != 200:
-                    await response.aclose()
-                    # 非 200，读取 body 并返回 JSONResponse
-                    err_body = await response.aread()
+                    # 非 200：不要强制 JSON，也不要提前 aclose()
+                    # 需求：透传上游状态码 + 上游响应体（尽可能保留 content-type）
+                    filtered_header_names = [
+                        "content-length", "transfer-encoding", "content-encoding",
+                        "set-cookie",
+                        "strict-transport-security",
+                        "content-security-policy", "content-security-policy-report-only",
+                        "x-frame-options",
+                        "x-content-type-options",
+                        "x-xss-protection",
+                        "permissions-policy",
+                        "referrer-policy",
+                    ]
+                    pass_headers = {
+                        k: v for k, v in response.headers.items()
+                        if k.lower() not in filtered_header_names
+                    }
+
                     try:
-                        content = json.loads(err_body)
-                    except:
-                        content = {"error": err_body.decode('utf-8', errors='ignore')}
-                    return JSONResponse(status_code=response.status_code, content=content)
+                        err_body = await response.aread()
+                    finally:
+                        await response.aclose()
+
+                    media_type = response.headers.get("content-type")
+                    return Response(
+                        content=err_body,
+                        status_code=response.status_code,
+                        headers=pass_headers,
+                        media_type=media_type,
+                    )
 
                 # 启用延迟检查
                 if delay_stream_header:
@@ -275,6 +297,31 @@ class UpstreamClient:
                     headers=filtered_headers,
                     json=body
                 )
+
+                # 非 200：透传上游状态码 + 原始响应体（尽可能保留 content-type）
+                if response.status_code != 200:
+                    filtered_header_names = [
+                        "content-length", "transfer-encoding", "content-encoding",
+                        "set-cookie",
+                        "strict-transport-security",
+                        "content-security-policy", "content-security-policy-report-only",
+                        "x-frame-options",
+                        "x-content-type-options",
+                        "x-xss-protection",
+                        "permissions-policy",
+                        "referrer-policy",
+                    ]
+                    pass_headers = {
+                        k: v for k, v in response.headers.items()
+                        if k.lower() not in filtered_header_names
+                    }
+                    media_type = response.headers.get("content-type")
+                    return Response(
+                        content=response.content,
+                        status_code=response.status_code,
+                        headers=pass_headers,
+                        media_type=media_type,
+                    )
                 
                 # 尝试解析 JSON
                 try:
