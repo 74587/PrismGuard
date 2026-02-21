@@ -202,9 +202,23 @@ class UpstreamClient:
                         import traceback
                         traceback.print_exc()
                         await response.aclose()
+
+                        # delay_stream_header 场景下：响应头尚未发送。
+                        # 这里发生错误说明“开始流之前就失败了”，因此统一返回普通 JSON 错误体（不返回 SSE）。
+                        # 注意：OpenAI 的 HTTP 错误响应通常是 {"error": {...}}（与是否为 Responses/Chat 无关）。
+                        error_format = src_format or target_format or "openai_chat"
+
+                        err_obj = {
+                            "code": "UPSTREAM_STREAM_ERROR",
+                            "message": f"Stream disconnected before valid content: {str(e)}",
+                            "type": "upstream_stream_error",
+                            "format": error_format,
+                        }
+
+                        # 预读阶段断流/校验失败：按要求使用 429
                         return JSONResponse(
-                            status_code=502,
-                            content={"error": {"code": "UPSTREAM_STREAM_ERROR", "message": f"Stream disconnected before valid content: {str(e)}"}}
+                            status_code=429,
+                            content={"error": err_obj},
                         )
 
                     # 构造新的生成器，先发 buffer，再发剩余流
