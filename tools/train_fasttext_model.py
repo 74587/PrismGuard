@@ -14,7 +14,11 @@ import sys
 import os
 import time
 import json
-import fcntl
+try:
+    import fcntl  # POSIX
+except ImportError:
+    fcntl = None
+    import msvcrt  # Windows
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,6 +31,24 @@ from ai_proxy.moderation.smart.storage import SampleStorage
 
 # 全局锁路径（所有 profile 共用）
 GLOBAL_LOCK_PATH = "configs/mod_profiles/.global_train.lock"
+
+
+def _acquire_global_lock(lock_file) -> None:
+    """跨平台非阻塞文件锁。失败时抛出 OSError。"""
+    if fcntl is not None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return
+    lock_file.seek(0)
+    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+
+
+def _release_global_lock(lock_file) -> None:
+    """释放跨平台文件锁。"""
+    if fcntl is not None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        return
+    lock_file.seek(0)
+    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _status_path(profile: ModerationProfile) -> str:
@@ -85,7 +107,7 @@ def main():
     # 使用全局锁（所有 profile 共用一个锁）
     try:
         lock_file = open(GLOBAL_LOCK_PATH, 'w')
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _acquire_global_lock(lock_file)
         lock_file.write(f"pid={os.getpid()}\nprofile={profile_name}\ntime={int(time.time())}\n")
         lock_file.flush()
     except (IOError, OSError):
@@ -175,7 +197,7 @@ def main():
         
         # 释放全局锁
         if lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            _release_global_lock(lock_file)
             lock_file.close()
 
 

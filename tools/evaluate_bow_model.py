@@ -63,8 +63,8 @@ def evaluate_bow_model(profile_name: str, sample_size: int = 100):
         print(f"   请先训练模型: python tools/train_bow_model.py {profile_name}")
         return
     
-    print(f"✅ 模型文件: {profile.get_bow_model_path()}")
-    print(f"✅ 向量化器: {profile.get_bow_vectorizer_path()}")
+    print(f"✅ 模型文件: {profile.get_model_path()}")
+    print(f"✅ 向量化器: {profile.get_vectorizer_path()}")
     
     # 加载数据库样本
     storage = SampleStorage(profile.get_db_path())
