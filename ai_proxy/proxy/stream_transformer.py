@@ -1,36 +1,72 @@
 """
 流式响应转换器 - 在不同协议的 SSE 之间互转
+
+支持的格式：
+- openai_chat (Chat Completions SSE)
+- openai_responses (Responses SSE)
+- claude_chat (Anthropic Messages SSE)
+- gemini_chat (Gemini alt=sse)
 """
+
+from __future__ import annotations
+
 import json
 import time
-from typing import List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 
-def _encode_sse(data: str) -> bytes:
+def _encode_sse(data: str, event: Optional[str] = None) -> bytes:
+    if event:
+        return f"event: {event}\ndata: {data}\n\n".encode("utf-8")
     return f"data: {data}\n\n".encode("utf-8")
 
 
-def _encode_json(payload: dict) -> bytes:
-    return _encode_sse(json.dumps(payload, ensure_ascii=False))
+def _encode_json(payload: dict, event: Optional[str] = None) -> bytes:
+    return _encode_sse(json.dumps(payload, ensure_ascii=False), event=event)
+
+
+def _json_dumps_compact(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def _safe_json_loads(s: Any) -> Any:
+    if isinstance(s, (dict, list)):
+        return s
+    if not isinstance(s, str):
+        return {}
+    try:
+        return json.loads(s)
+    except Exception:
+        return {}
+
+
+class SSEFrame:
+    def __init__(self, event: Optional[str], data: str) -> None:
+        self.event = event
+        self.data = data
 
 
 class BaseSSEAdapter:
-    """基础 SSE 适配器"""
-
-    def handle_payload(self, payload: str) -> List[bytes]:
-        payload = payload.strip()
-        if not payload:
+    def handle_frame(self, frame: SSEFrame) -> List[bytes]:
+        data = (frame.data or "").strip()
+        if not data:
             return []
-        if payload == "[DONE]":
-            return [_encode_sse("[DONE]")]
+        if data == "[DONE]":
+            return self.on_done()
+
         try:
-            event = json.loads(payload)
+            obj = json.loads(data)
         except json.JSONDecodeError:
             return []
-        return self.handle_event(event)
 
-    def handle_event(self, event: dict) -> List[bytes]:
+        event_name = frame.event or obj.get("type") or obj.get("event")
+        return self.handle_event(event_name, obj)
+
+    def handle_event(self, event_name: Optional[str], event: dict) -> List[bytes]:
         raise NotImplementedError
+
+    def on_done(self) -> List[bytes]:
+        return [_encode_sse("[DONE]")]
 
     def flush(self) -> List[bytes]:
         return []
@@ -54,111 +90,101 @@ class SSEBufferTransformer:
 
         while "\n\n" in self.buffer:
             raw_event, self.buffer = self.buffer.split("\n\n", 1)
-            data_lines = [line[5:].lstrip() for line in raw_event.splitlines() if line.startswith("data:")]
-            if not data_lines:
+            frame = self._parse_frame(raw_event)
+            if frame is None:
                 continue
-            payload = "\n".join(data_lines)
-            outputs.extend(self.adapter.handle_payload(payload))
+            outputs.extend(self.adapter.handle_frame(frame))
 
         return outputs
 
     def flush(self) -> List[bytes]:
         remaining = self.buffer.strip()
         self.buffer = ""
-        outputs = []
+        outputs: List[bytes] = []
         if remaining:
-            outputs.extend(self.adapter.handle_payload(remaining))
+            frame = self._parse_frame(remaining)
+            if frame is not None:
+                outputs.extend(self.adapter.handle_frame(frame))
         outputs.extend(self.adapter.flush())
         return outputs
 
+    @staticmethod
+    def _parse_frame(raw_event: str) -> Optional[SSEFrame]:
+        event_name: Optional[str] = None
+        data_lines: List[str] = []
+        for line in raw_event.splitlines():
+            if line.startswith("event:"):
+                event_name = line[len("event:") :].strip() or None
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:") :].lstrip())
+        if not data_lines and event_name is None:
+            return None
+        return SSEFrame(event=event_name, data="\n".join(data_lines))
 
-class ResponsesToChatAdapter(BaseSSEAdapter):
-    """OpenAI Responses -> OpenAI Chat SSE"""
 
+class _InternalStreamSink:
+    def on_start(self, meta: Dict[str, Any]) -> List[bytes]:
+        return []
+
+    def on_text_delta(self, text: str) -> List[bytes]:
+        return []
+
+    def on_tool_call_start(self, call_id: str, name: str) -> List[bytes]:
+        return []
+
+    def on_tool_call_args_delta(self, call_id: str, name: str, delta: str) -> List[bytes]:
+        return []
+
+    def on_final(self, meta: Dict[str, Any]) -> List[bytes]:
+        return []
+
+    def on_done(self) -> List[bytes]:
+        return []
+
+    def flush(self) -> List[bytes]:
+        return []
+
+
+class _OpenAIChatSink(_InternalStreamSink):
     def __init__(self) -> None:
         self.response_id: Optional[str] = None
         self.model: Optional[str] = None
         self.created_at: Optional[int] = None
+        self.role_sent = False
 
-    def handle_event(self, event: dict) -> List[bytes]:
-        etype = event.get("type")
-        if not etype:
+    def on_start(self, meta: Dict[str, Any]) -> List[bytes]:
+        self.response_id = meta.get("id") or self.response_id or ""
+        self.model = meta.get("model") or self.model or ""
+        self.created_at = meta.get("created") or meta.get("created_at") or self.created_at or int(time.time())
+        if self.role_sent:
             return []
+        self.role_sent = True
+        return [self._build_chunk({"role": "assistant"})]
 
-        if etype in {"response.created", "response.in_progress"}:
-            resp = event.get("response") or {}
-            self.response_id = resp.get("id", self.response_id)
-            self.model = resp.get("model", self.model)
-            self.created_at = resp.get("created_at", self.created_at) or int(time.time())
-            delta = {"role": "assistant"}
-            return [self._build_chunk(delta)]
-
-        if etype == "response.output_text.delta":
-            delta_text = event.get("delta") or event.get("text") or ""
-            if not delta_text:
-                return []
-            delta = {"content": delta_text}
-            return [self._build_chunk(delta)]
-
-        if etype in {"response.function_call_arguments.delta", "response.function_call.delta"}:
-            arguments = event.get("delta") or event.get("arguments") or ""
-            call_id = event.get("call_id") or ""
-            name = event.get("name") or ""
-            tool_calls = [
-                {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": arguments,
-                    },
-                }
-            ]
-            delta = {"tool_calls": tool_calls}
-            return [self._build_chunk(delta)]
-
-        if etype == "response.output_item.added":
-            item = event.get("item") or {}
-            if item.get("type") == "function_call":
-                tool_calls = [
-                    {
-                        "id": item.get("call_id"),
-                        "type": "function",
-                        "function": {
-                            "name": item.get("name"),
-                            "arguments": "",
-                        },
-                    }
-                ]
-                delta = {"tool_calls": tool_calls}
-                return [self._build_chunk(delta)]
+    def on_text_delta(self, text: str) -> List[bytes]:
+        if not text:
             return []
+        return [self._build_chunk({"content": text})]
 
-        if etype == "response.reasoning_summary_text.delta":
-            text = event.get("delta")
-            if not text:
-                return []
-            delta = {"content": text}
-            return [self._build_chunk(delta)]
+    def on_tool_call_start(self, call_id: str, name: str) -> List[bytes]:
+        if not call_id and not name:
+            return []
+        return [self._build_chunk({"tool_calls": [self._tool_call_delta(call_id, name, "")]})]
 
-        if etype in {"response.completed", "response.failed", "response.incomplete", "error"}:
-            finish_reason = None
-            usage = None
-            resp = event.get("response") or {}
-            status = (resp.get("status") or "").lower()
-            if etype == "error":
-                finish_reason = "error"
-            elif status == "completed":
-                finish_reason = "stop"
-            elif status == "incomplete":
-                finish_reason = "length"
-            elif status == "failed":
-                finish_reason = "error"
+    def on_tool_call_args_delta(self, call_id: str, name: str, delta: str) -> List[bytes]:
+        if not delta:
+            return []
+        return [self._build_chunk({"tool_calls": [self._tool_call_delta(call_id, name, delta)]})]
 
-            usage = self._convert_usage(resp.get("usage"))
-            return [self._build_chunk({}, finish_reason=finish_reason, usage=usage)]
+    def on_final(self, meta: Dict[str, Any]) -> List[bytes]:
+        return [self._build_chunk({}, finish_reason=meta.get("finish_reason"), usage=meta.get("usage"))]
 
-        return []
+    def on_done(self) -> List[bytes]:
+        return [_encode_sse("[DONE]")]
+
+    @staticmethod
+    def _tool_call_delta(call_id: str, name: str, arguments: str) -> dict:
+        return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
 
     def _build_chunk(self, delta: dict, finish_reason: Optional[str] = None, usage: Optional[dict] = None) -> bytes:
         chunk = {
@@ -166,85 +192,72 @@ class ResponsesToChatAdapter(BaseSSEAdapter):
             "object": "chat.completion.chunk",
             "created": self.created_at or int(time.time()),
             "model": self.model or "",
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": delta,
-                    "finish_reason": finish_reason,
-                }
-            ],
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
         }
         if usage:
             chunk["usage"] = usage
         return _encode_json(chunk)
 
-    @staticmethod
-    def _convert_usage(usage: Optional[dict]) -> Optional[dict]:
-        if not isinstance(usage, dict):
-            return None
-        return {
-            "prompt_tokens": usage.get("input_tokens", 0),
-            "completion_tokens": usage.get("output_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-        }
 
-
-class ChatToResponsesAdapter(BaseSSEAdapter):
-    """OpenAI Chat -> OpenAI Responses SSE"""
-
+class _ResponsesSink(_InternalStreamSink):
     def __init__(self) -> None:
         self.response_id: Optional[str] = None
         self.model: Optional[str] = None
         self.created_at: Optional[int] = None
         self.started = False
 
-    def handle_event(self, event: dict) -> List[bytes]:
-        if event.get("choices") is None:
+    def on_start(self, meta: Dict[str, Any]) -> List[bytes]:
+        self.response_id = meta.get("id") or self.response_id or ""
+        self.model = meta.get("model") or self.model or ""
+        self.created_at = meta.get("created_at") or meta.get("created") or self.created_at or int(time.time())
+        if self.started:
             return []
+        self.started = True
+        resp = self._response_stub(status="in_progress")
+        return [
+            _encode_json({"type": "response.created", "response": resp}),
+            _encode_json({"type": "response.in_progress", "response": resp}),
+        ]
 
-        self.response_id = event.get("id", self.response_id)
-        self.model = event.get("model", self.model)
-        self.created_at = event.get("created", self.created_at) or int(time.time())
+    def on_text_delta(self, text: str) -> List[bytes]:
+        if not text:
+            return []
+        return [_encode_json({"type": "response.output_text.delta", "delta": text, "output_index": 0})]
 
-        outputs: List[bytes] = []
-        if not self.started:
-            self.started = True
-            resp = self._response_stub(status="in_progress")
-            outputs.append(_encode_json({"type": "response.created", "response": resp}))
-            outputs.append(_encode_json({"type": "response.in_progress", "response": resp}))
+    def on_tool_call_start(self, call_id: str, name: str) -> List[bytes]:
+        return [_encode_json({"type": "response.output_item.added", "item": {"type": "function_call", "call_id": call_id, "name": name}})]
 
-        choice = event["choices"][0]
-        delta = choice.get("delta") or {}
+    def on_tool_call_args_delta(self, call_id: str, name: str, delta: str) -> List[bytes]:
+        if not delta:
+            return []
+        return [_encode_json({"type": "response.function_call_arguments.delta", "call_id": call_id, "name": name, "delta": delta})]
 
-        if delta.get("content"):
-            outputs.append(
-                _encode_json(
-                    {
-                        "type": "response.output_text.delta",
-                        "delta": delta["content"],
-                        "output_index": 0,
-                    }
-                )
-            )
+    def on_final(self, meta: Dict[str, Any]) -> List[bytes]:
+        finish_reason = meta.get("finish_reason") or "stop"
+        status = {"stop": "completed", "length": "incomplete", "error": "failed"}.get(finish_reason, "completed")
+        resp = self._response_stub(status=status)
 
-        if delta.get("tool_calls"):
-            for tool_call in delta["tool_calls"]:
-                outputs.extend(self._handle_tool_call(tool_call))
+        usage = meta.get("usage")
+        if usage and isinstance(usage, dict):
+            input_tokens = usage.get("input_tokens")
+            output_tokens = usage.get("output_tokens")
+            total_tokens = usage.get("total_tokens")
+            if input_tokens is None and "prompt_tokens" in usage:
+                input_tokens = usage.get("prompt_tokens", 0)
+            if output_tokens is None and "completion_tokens" in usage:
+                output_tokens = usage.get("completion_tokens", 0)
+            if total_tokens is None and input_tokens is not None and output_tokens is not None:
+                total_tokens = int(input_tokens) + int(output_tokens)
+            resp["usage"] = {
+                "input_tokens": int(input_tokens or 0),
+                "output_tokens": int(output_tokens or 0),
+                "total_tokens": int(total_tokens or 0),
+            }
 
-        finish_reason = choice.get("finish_reason")
-        if finish_reason:
-            status = {
-                "stop": "completed",
-                "length": "incomplete",
-                "content_filter": "failed",
-                "function_call": "completed",
-                "tool_calls": "completed",
-                "error": "failed",
-            }.get(finish_reason, "completed")
-            resp = self._response_stub(status=status)
-            outputs.append(_encode_json({"type": "response.completed", "response": resp}))
+        return [_encode_json({"type": "response.completed", "response": resp})]
 
-        return outputs
+    def on_done(self) -> List[bytes]:
+        return [_encode_sse("[DONE]")]
 
     def _response_stub(self, status: str) -> dict:
         return {
@@ -256,47 +269,434 @@ class ChatToResponsesAdapter(BaseSSEAdapter):
             "output": [],
         }
 
-    def _handle_tool_call(self, tool_call: dict) -> List[bytes]:
-        call_id = tool_call.get("id")
-        function = tool_call.get("function") or {}
-        name = function.get("name")
-        arguments = function.get("arguments", "")
 
-        outputs = []
-        outputs.append(
-            _encode_json(
+class _GeminiSink(_InternalStreamSink):
+    def __init__(self) -> None:
+        self.response_id: Optional[str] = None
+        self.model: Optional[str] = None
+        self.tool_args_buffers: Dict[str, str] = {}
+        self.tool_names: Dict[str, str] = {}
+
+    def on_start(self, meta: Dict[str, Any]) -> List[bytes]:
+        self.response_id = meta.get("id") or self.response_id or "gemini-stream"
+        self.model = meta.get("model") or self.model or "gemini"
+        return []
+
+    def on_text_delta(self, text: str) -> List[bytes]:
+        if not text:
+            return []
+        payload = {
+            "candidates": [{"content": {"parts": [{"text": text}], "role": "model"}, "index": 0}],
+            "responseId": self.response_id,
+            "modelVersion": self.model,
+        }
+        return [_encode_json(payload)]
+
+    def on_tool_call_start(self, call_id: str, name: str) -> List[bytes]:
+        if not call_id:
+            return []
+        self.tool_args_buffers.setdefault(call_id, "")
+        self.tool_names[call_id] = name
+        return []
+
+    def on_tool_call_args_delta(self, call_id: str, name: str, delta: str) -> List[bytes]:
+        if not call_id:
+            return []
+        self.tool_args_buffers[call_id] = self.tool_args_buffers.get(call_id, "") + (delta or "")
+        self.tool_names[call_id] = name or self.tool_names.get(call_id, "")
+        buf = self.tool_args_buffers[call_id].strip()
+
+        args_obj = _safe_json_loads(buf)
+        if not isinstance(args_obj, dict) or not args_obj:
+            return []
+
+        payload = {
+            "candidates": [
                 {
-                    "type": "response.output_item.added",
-                    "item": {
-                        "type": "function_call",
-                        "call_id": call_id,
-                        "name": name,
+                    "content": {
+                        "parts": [{"functionCall": {"id": call_id, "name": self.tool_names.get(call_id, name) or "", "args": args_obj}}],
+                        "role": "model",
                     },
+                    "index": 0,
                 }
-            )
-        )
-        if arguments:
-            outputs.append(
-                _encode_json(
-                    {
-                        "type": "response.function_call_arguments.delta",
-                        "call_id": call_id,
-                        "name": name,
-                        "delta": arguments,
-                    }
-                )
-            )
-        return outputs
+            ],
+            "responseId": self.response_id,
+            "modelVersion": self.model,
+        }
+        self.tool_args_buffers[call_id] = ""
+        return [_encode_json(payload)]
+
+    def flush(self) -> List[bytes]:
+        outs: List[bytes] = []
+        for call_id, buf in list(self.tool_args_buffers.items()):
+            b = (buf or "").strip()
+            if not b:
+                continue
+            args_obj = _safe_json_loads(b)
+            if isinstance(args_obj, dict) and args_obj:
+                outs.extend(self.on_tool_call_args_delta(call_id, self.tool_names.get(call_id, ""), b))
+        return outs
+
+    def on_done(self) -> List[bytes]:
+        return [_encode_sse("[DONE]")]
+
+
+class _ClaudeSink(_InternalStreamSink):
+    def __init__(self) -> None:
+        self.message_id: Optional[str] = None
+        self.model: Optional[str] = None
+        self.started = False
+        self.open_blocks: List[Tuple[int, str]] = []  # (index, type)
+        self.next_block_index = 0
+        self.tool_names: Dict[str, str] = {}
+
+    def on_start(self, meta: Dict[str, Any]) -> List[bytes]:
+        if self.started:
+            return []
+        self.started = True
+        self.message_id = meta.get("id") or self.message_id or "claude-stream"
+        self.model = meta.get("model") or self.model or "claude"
+        payload = {
+            "type": "message_start",
+            "message": {
+                "id": self.message_id,
+                "type": "message",
+                "role": "assistant",
+                "model": self.model,
+                "content": [],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            },
+        }
+        return [_encode_json(payload, event="message_start")]
+
+    def _ensure_text_block(self) -> List[bytes]:
+        for _, btype in self.open_blocks:
+            if btype == "text":
+                return []
+        index = self.next_block_index
+        self.next_block_index += 1
+        self.open_blocks.append((index, "text"))
+        payload = {"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}}
+        return [_encode_json(payload, event="content_block_start")]
+
+    def on_text_delta(self, text: str) -> List[bytes]:
+        if not text:
+            return []
+        outs: List[bytes] = []
+        outs.extend(self._ensure_text_block())
+        index = next((i for i, t in self.open_blocks if t == "text"), 0)
+        payload = {"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": text}}
+        outs.append(_encode_json(payload, event="content_block_delta"))
+        return outs
+
+    def on_tool_call_start(self, call_id: str, name: str) -> List[bytes]:
+        if not call_id:
+            return []
+        index = self.next_block_index
+        self.next_block_index += 1
+        self.open_blocks.append((index, f"tool_use:{call_id}"))
+        self.tool_names[call_id] = name
+        payload = {
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {"type": "tool_use", "id": call_id, "name": name, "input": {}},
+        }
+        return [_encode_json(payload, event="content_block_start")]
+
+    def on_tool_call_args_delta(self, call_id: str, name: str, delta: str) -> List[bytes]:
+        if not call_id or not delta:
+            return []
+        self.tool_names[call_id] = name or self.tool_names.get(call_id, "")
+        index = next((i for i, t in self.open_blocks if t == f"tool_use:{call_id}"), None)
+        outs: List[bytes] = []
+        if index is None:
+            outs.extend(self.on_tool_call_start(call_id, self.tool_names.get(call_id, "")))
+            index = next((i for i, t in self.open_blocks if t == f"tool_use:{call_id}"), 0)
+        payload = {"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": delta}}
+        outs.append(_encode_json(payload, event="content_block_delta"))
+        return outs
+
+    def on_final(self, meta: Dict[str, Any]) -> List[bytes]:
+        outs: List[bytes] = []
+        for idx, _ in list(self.open_blocks):
+            outs.append(_encode_json({"type": "content_block_stop", "index": idx}, event="content_block_stop"))
+        self.open_blocks = []
+
+        stop_reason = meta.get("finish_reason") or "end_turn"
+        outs.append(_encode_json({"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}}, event="message_delta"))
+        outs.append(_encode_json({"type": "message_stop"}, event="message_stop"))
+        return outs
+
+    def on_done(self) -> List[bytes]:
+        return [_encode_sse("[DONE]")]
+
+
+def _create_sink(to_format: str) -> _InternalStreamSink:
+    if to_format == "openai_chat":
+        return _OpenAIChatSink()
+    if to_format == "openai_responses":
+        return _ResponsesSink()
+    if to_format == "gemini_chat":
+        return _GeminiSink()
+    if to_format == "claude_chat":
+        return _ClaudeSink()
+    return _OpenAIChatSink()
+
+
+def _decode_to_internal(
+    from_format: str,
+    event_name: Optional[str],
+    event: Dict[str, Any],
+    meta: Dict[str, Any],
+    seen_tool_calls: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    outs: List[Dict[str, Any]] = []
+
+    def emit_start_once() -> None:
+        if meta and "__started__" not in seen_tool_calls:
+            seen_tool_calls["__started__"] = {"started": True}
+            outs.append({"type": "start", "meta": dict(meta)})
+
+    if from_format == "openai_chat":
+        if event.get("choices") is None:
+            return []
+        meta["id"] = event.get("id", meta.get("id"))
+        meta["model"] = event.get("model", meta.get("model"))
+        meta["created"] = event.get("created", meta.get("created")) or int(time.time())
+        emit_start_once()
+
+        choice = (event.get("choices") or [{}])[0]
+        delta = choice.get("delta") or {}
+        content = delta.get("content")
+        if content:
+            outs.append({"type": "text_delta", "text": content})
+
+        for tc in delta.get("tool_calls") or []:
+            call_id = tc.get("id") or ""
+            fn = tc.get("function") or {}
+            name = fn.get("name") or ""
+            args = fn.get("arguments") or ""
+            if call_id and call_id not in seen_tool_calls:
+                seen_tool_calls[call_id] = {"name": name}
+                outs.append({"type": "tool_call_start", "id": call_id, "name": name})
+            if args:
+                outs.append({"type": "tool_call_args_delta", "id": call_id, "name": name, "delta": args})
+
+        finish_reason = choice.get("finish_reason")
+        if finish_reason:
+            outs.append({"type": "final", "meta": {"finish_reason": finish_reason, "usage": event.get("usage")}})
+            outs.append({"type": "done"})
+
+        return outs
+
+    if from_format == "openai_responses":
+        etype = event.get("type")
+        if not etype:
+            return []
+        resp = event.get("response") or {}
+        if etype in {"response.created", "response.in_progress"}:
+            meta["id"] = resp.get("id", meta.get("id"))
+            meta["model"] = resp.get("model", meta.get("model"))
+            meta["created_at"] = resp.get("created_at", meta.get("created_at")) or int(time.time())
+            emit_start_once()
+            return outs
+
+        if etype == "response.output_text.delta":
+            text = event.get("delta") or event.get("text") or ""
+            if text:
+                outs.append({"type": "text_delta", "text": text})
+            return outs
+
+        if etype == "response.output_item.added":
+            item = event.get("item") or {}
+            if item.get("type") == "function_call":
+                call_id = item.get("call_id") or item.get("id") or ""
+                name = item.get("name") or ""
+                if call_id and call_id not in seen_tool_calls:
+                    seen_tool_calls[call_id] = {"name": name}
+                    outs.append({"type": "tool_call_start", "id": call_id, "name": name})
+            return outs
+
+        if etype in {"response.function_call_arguments.delta", "response.function_call.delta"}:
+            call_id = event.get("call_id") or ""
+            name = event.get("name") or seen_tool_calls.get(call_id, {}).get("name") or ""
+            delta_args = event.get("delta") or event.get("arguments") or ""
+            if call_id and call_id not in seen_tool_calls:
+                seen_tool_calls[call_id] = {"name": name}
+                outs.append({"type": "tool_call_start", "id": call_id, "name": name})
+            if delta_args:
+                outs.append({"type": "tool_call_args_delta", "id": call_id, "name": name, "delta": delta_args})
+            return outs
+
+        if etype in {"response.completed", "response.failed", "response.incomplete", "error"}:
+            usage = None
+            finish_reason = "stop"
+            if etype == "error":
+                finish_reason = "error"
+            else:
+                status = (resp.get("status") or "").lower()
+                if status == "completed":
+                    finish_reason = "stop"
+                elif status == "incomplete":
+                    finish_reason = "length"
+                elif status == "failed":
+                    finish_reason = "error"
+
+            if isinstance(resp.get("usage"), dict):
+                u = resp["usage"]
+                usage = {"input_tokens": u.get("input_tokens", 0), "output_tokens": u.get("output_tokens", 0), "total_tokens": u.get("total_tokens", 0)}
+
+            outs.append({"type": "final", "meta": {"finish_reason": finish_reason, "usage": usage}})
+            outs.append({"type": "done"})
+            return outs
+
+        return outs
+
+    if from_format == "gemini_chat":
+        candidates = event.get("candidates") or []
+        if not isinstance(candidates, list) or not candidates:
+            return []
+        meta.setdefault("id", event.get("responseId") or event.get("id") or meta.get("id") or "gemini-stream")
+        meta.setdefault("model", event.get("modelVersion") or meta.get("model") or "gemini")
+        emit_start_once()
+
+        candidate = candidates[0] if candidates else {}
+        content = candidate.get("content") or {}
+        for part in content.get("parts") or []:
+            if isinstance(part, dict) and "text" in part and part["text"]:
+                outs.append({"type": "text_delta", "text": part.get("text")})
+            if isinstance(part, dict) and "functionCall" in part:
+                fc = part.get("functionCall") or {}
+                call_id = fc.get("id") or f"gemini_call_{len([k for k in seen_tool_calls.keys() if k != '__started__'])}"
+                name = fc.get("name") or ""
+                args_obj = fc.get("args") or {}
+                if call_id not in seen_tool_calls:
+                    seen_tool_calls[call_id] = {"name": name}
+                    outs.append({"type": "tool_call_start", "id": call_id, "name": name})
+                outs.append({"type": "tool_call_args_delta", "id": call_id, "name": name, "delta": _json_dumps_compact(args_obj)})
+        return outs
+
+    if from_format == "claude_chat":
+        dtype = event.get("type") or event_name
+        if not dtype:
+            return []
+
+        if dtype == "message_start":
+            msg = event.get("message") or {}
+            meta["id"] = msg.get("id", meta.get("id"))
+            meta["model"] = msg.get("model", meta.get("model"))
+            emit_start_once()
+
+            for b in msg.get("content") or []:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    call_id = b.get("id") or ""
+                    name = b.get("name") or ""
+                    if call_id and call_id not in seen_tool_calls:
+                        seen_tool_calls[call_id] = {"name": name}
+                        outs.append({"type": "tool_call_start", "id": call_id, "name": name})
+                    input_obj = b.get("input") or {}
+                    if input_obj:
+                        outs.append({"type": "tool_call_args_delta", "id": call_id, "name": name, "delta": _json_dumps_compact(input_obj)})
+            return outs
+
+        if dtype == "content_block_start":
+            cb = event.get("content_block") or {}
+            if cb.get("type") == "tool_use":
+                call_id = cb.get("id") or ""
+                name = cb.get("name") or ""
+                if call_id and call_id not in seen_tool_calls:
+                    seen_tool_calls[call_id] = {"name": name}
+                    outs.append({"type": "tool_call_start", "id": call_id, "name": name})
+                input_obj = cb.get("input") or {}
+                if input_obj:
+                    outs.append({"type": "tool_call_args_delta", "id": call_id, "name": name, "delta": _json_dumps_compact(input_obj)})
+            return outs
+
+        if dtype == "content_block_delta":
+            delta = event.get("delta") or {}
+            if delta.get("type") == "text_delta":
+                text = delta.get("text") or ""
+                if text:
+                    outs.append({"type": "text_delta", "text": text})
+            elif delta.get("type") == "input_json_delta":
+                partial = delta.get("partial_json") or ""
+                last_tool = next((k for k in reversed(list(seen_tool_calls.keys())) if k != "__started__"), None)
+                if last_tool:
+                    outs.append({"type": "tool_call_args_delta", "id": last_tool, "name": seen_tool_calls.get(last_tool, {}).get("name") or "", "delta": partial})
+            return outs
+
+        if dtype == "message_delta":
+            delta = event.get("delta") or {}
+            outs.append({"type": "final", "meta": {"finish_reason": delta.get("stop_reason"), "usage": event.get("usage")}})
+            return outs
+
+        if dtype == "message_stop":
+            outs.append({"type": "done"})
+            return outs
+
+        return outs
+
+    return outs
+
+
+class _StreamTranscoder(BaseSSEAdapter):
+    def __init__(self, from_format: str, to_format: str) -> None:
+        self.from_format = from_format
+        self.to_format = to_format
+        self.started = False
+        self.meta: Dict[str, Any] = {}
+        self.seen_tool_calls: Dict[str, Dict[str, Any]] = {}
+        self.sink = _create_sink(to_format)
+
+    def handle_event(self, event_name: Optional[str], event: dict) -> List[bytes]:
+        outs: List[bytes] = []
+        internal_events = _decode_to_internal(self.from_format, event_name, event, self.meta, self.seen_tool_calls)
+
+        for ie in internal_events:
+            itype = ie.get("type")
+            if itype == "start":
+                self.started = True
+                outs.extend(self.sink.on_start(ie.get("meta") or {}))
+            elif itype == "text_delta":
+                if not self.started:
+                    self.started = True
+                    outs.extend(self.sink.on_start(self.meta))
+                outs.extend(self.sink.on_text_delta(ie.get("text") or ""))
+            elif itype == "tool_call_start":
+                if not self.started:
+                    self.started = True
+                    outs.extend(self.sink.on_start(self.meta))
+                outs.extend(self.sink.on_tool_call_start(ie.get("id") or "", ie.get("name") or ""))
+            elif itype == "tool_call_args_delta":
+                if not self.started:
+                    self.started = True
+                    outs.extend(self.sink.on_start(self.meta))
+                outs.extend(self.sink.on_tool_call_args_delta(ie.get("id") or "", ie.get("name") or "", ie.get("delta") or ""))
+            elif itype == "final":
+                if not self.started:
+                    self.started = True
+                    outs.extend(self.sink.on_start(self.meta))
+                outs.extend(self.sink.on_final(ie.get("meta") or {}))
+            elif itype == "done":
+                outs.extend(self.sink.on_done())
+
+        return outs
+
+    def on_done(self) -> List[bytes]:
+        return self.sink.on_done()
+
+    def flush(self) -> List[bytes]:
+        return self.sink.flush()
 
 
 def create_stream_transformer(from_format: str, to_format: str) -> Optional[SSEBufferTransformer]:
     """创建指定格式之间的流式转换器"""
-    adapter: Optional[BaseSSEAdapter] = None
-    if from_format == "openai_responses" and to_format == "openai_chat":
-        adapter = ResponsesToChatAdapter()
-    elif from_format == "openai_chat" and to_format == "openai_responses":
-        adapter = ChatToResponsesAdapter()
-
-    if adapter is None:
+    if not from_format or not to_format or from_format == to_format:
         return None
-    return SSEBufferTransformer(adapter)
+    supported = {"openai_chat", "openai_responses", "gemini_chat", "claude_chat"}
+    if from_format not in supported or to_format not in supported:
+        return None
+    return SSEBufferTransformer(_StreamTranscoder(from_format, to_format))
+

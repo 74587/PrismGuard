@@ -298,11 +298,27 @@ class UpstreamClient:
                             pass_headers["content-type"] = "text/event-stream"
                         else:
                             print(f"[UPSTREAM] ✅ Content-Type is already text/event-stream")
-                    
-                    return StreamingResponse(
-                        response.aiter_bytes(),
-                        headers=pass_headers
-                    )
+
+                    # ✅ 即使不启用 delay_stream_header，也要支持流式响应格式转换
+                    # 这里必须使用自定义生成器来确保 aclose() 被调用，并且可做 SSE 转换。
+                    use_gzip = False  # SSE 不做应用层 gzip
+                    aiter = response.aiter_bytes()
+                    buffer = []
+
+                    if src_format and target_format and src_format != target_format:
+                        print(f"[UPSTREAM] Stream response transform enabled (no delay): {target_format} -> {src_format}")
+                        combined_gen = self._create_combined_generator_with_transform(
+                            buffer, aiter, response, target_format, src_format, use_gzip
+                        )
+                        # 转换后的流一定是 SSE
+                        if pass_headers.get("content-type") != "text/event-stream":
+                            pass_headers["content-type"] = "text/event-stream"
+                    else:
+                        combined_gen = self._create_combined_generator(buffer, aiter, response, use_gzip)
+                        if pass_headers.get("content-type") != "text/event-stream":
+                            pass_headers["content-type"] = "text/event-stream"
+
+                    return StreamingResponse(combined_gen, headers=pass_headers)
             else:
                 # 非流式请求（httpx 会自动处理 gzip 解压）
                 response = await self.client.request(
