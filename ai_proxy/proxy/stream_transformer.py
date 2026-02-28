@@ -10,23 +10,42 @@
 
 from __future__ import annotations
 
-import json
+import orjson
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 
-def _encode_sse(data: str, event: Optional[str] = None) -> bytes:
+def json_loads(s: Any) -> Any:
+    return orjson.loads(s)
+
+
+def json_dumps(obj: Any) -> bytes:
+    return orjson.dumps(obj, option=orjson.OPT_NON_STR_KEYS)
+
+
+def _encode_sse(data: str | bytes, event: Optional[str] = None) -> bytes:
+    if isinstance(data, bytes):
+        if event:
+            return (
+                b"event: "
+                + event.encode("utf-8")
+                + b"\n"
+                + b"data: "
+                + data
+                + b"\n\n"
+            )
+        return b"data: " + data + b"\n\n"
     if event:
         return f"event: {event}\ndata: {data}\n\n".encode("utf-8")
     return f"data: {data}\n\n".encode("utf-8")
 
 
 def _encode_json(payload: dict, event: Optional[str] = None) -> bytes:
-    return _encode_sse(json.dumps(payload, ensure_ascii=False), event=event)
+    return _encode_sse(json_dumps(payload), event=event)
 
 
 def _json_dumps_compact(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    return json_dumps(obj).decode("utf-8")
 
 
 def _safe_json_loads(s: Any) -> Any:
@@ -35,7 +54,7 @@ def _safe_json_loads(s: Any) -> Any:
     if not isinstance(s, str):
         return {}
     try:
-        return json.loads(s)
+        return json_loads(s)
     except Exception:
         return {}
 
@@ -55,8 +74,8 @@ class BaseSSEAdapter:
             return self.on_done()
 
         try:
-            obj = json.loads(data)
-        except json.JSONDecodeError:
+            obj = json_loads(data)
+        except orjson.JSONDecodeError:
             return []
 
         event_name = frame.event or obj.get("type") or obj.get("event")
@@ -699,4 +718,3 @@ def create_stream_transformer(from_format: str, to_format: str) -> Optional[SSEB
     if from_format not in supported or to_format not in supported:
         return None
     return SSEBufferTransformer(_StreamTranscoder(from_format, to_format))
-

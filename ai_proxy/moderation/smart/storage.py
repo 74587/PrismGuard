@@ -8,7 +8,6 @@ Compatibility goals:
 """
 from __future__ import annotations
 
-import json
 import os
 import random
 import shutil
@@ -19,8 +18,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import orjson
 from pydantic import BaseModel
 from rocksdict import Rdict
+
+
+def json_loads(s: str) -> dict:
+    return orjson.loads(s)
+
+
+def json_dumps(obj: dict) -> bytes:
+    return orjson.dumps(obj, option=orjson.OPT_NON_STR_KEYS)
+
+
+def json_dumps_text(obj: dict) -> str:
+    return json_dumps(obj).decode("utf-8")
 
 
 class Sample(BaseModel):
@@ -92,7 +104,7 @@ def _hash_text(text: str) -> str:
 
 
 def _parse_sample(raw: str) -> Sample:
-    data = json.loads(raw)
+    data = json_loads(raw)
     return Sample(
         id=data.get("id"),
         text=data.get("text", ""),
@@ -111,7 +123,7 @@ def _sample_to_json(sample: Sample, text_hash: str) -> str:
         "created_at": sample.created_at,
         "text_hash": text_hash,
     }
-    return json.dumps(payload, ensure_ascii=False)
+    return json_dumps_text(payload)
 
 
 def _get_db_and_lock(rocks_path: str) -> Tuple[Rdict, threading.RLock]:
@@ -497,7 +509,7 @@ class SampleStorage:
                 raw = self.db.get(_sample_key(sid))
                 if isinstance(raw, bytes):
                     raw = raw.decode("utf-8")
-                if raw is not None and json.loads(raw).get("text_hash") == text_hash:
+                if raw is not None and json_loads(raw).get("text_hash") == text_hash:
                     self.db[_text_latest_key(text_hash)] = str(sid)
                     return
             sid -= 1
@@ -533,7 +545,7 @@ class SampleStorage:
                     continue
                 if isinstance(raw, bytes):
                     raw = raw.decode("utf-8")
-                data = json.loads(raw)
+                data = json_loads(raw)
                 text_hash = data.get("text_hash", "")
                 sample_label = int(data.get("label", 0))
                 del self.db[_sample_key(sid)]

@@ -1,7 +1,7 @@
 """
 OpenAI Chat 格式转换 - 支持工具调用
 """
-import json
+import orjson
 from typing import Dict, Any
 from ai_proxy.transform.formats.internal_models import (
     InternalChatRequest,
@@ -13,6 +13,18 @@ from ai_proxy.transform.formats.internal_models import (
     InternalToolResult,
     InternalImageBlock,
 )
+
+
+def json_loads(s: str) -> Any:
+    return orjson.loads(s)
+
+
+def json_dumps(obj: Any) -> bytes:
+    return orjson.dumps(obj, option=orjson.OPT_NON_STR_KEYS)
+
+
+def json_dumps_text(obj: Any) -> str:
+    return json_dumps(obj).decode("utf-8")
 
 
 def can_parse_openai_chat(path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
@@ -126,7 +138,7 @@ def from_openai_chat(body: Dict[str, Any]) -> InternalChatRequest:
         for tc in msg.get("tool_calls", []):
             args_str = tc.get("function", {}).get("arguments", "{}")
             try:
-                args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                args = json_loads(args_str) if isinstance(args_str, str) else args_str
             except:
                 args = {}
             
@@ -216,7 +228,7 @@ def to_openai_chat(req: InternalChatRequest) -> Dict[str, Any]:
                     "type": "function",
                     "function": {
                         "name": tc.name,
-                        "arguments": json.dumps(tc.arguments, ensure_ascii=False)
+                        "arguments": json_dumps_text(tc.arguments)
                     }
                 } for tc in tool_call_blocks]
             
@@ -228,7 +240,7 @@ def to_openai_chat(req: InternalChatRequest) -> Dict[str, Any]:
                 "role": "tool",
                 "tool_call_id": tr.call_id,
                 "name": tr.name,
-                "content": json.dumps(tr.output, ensure_ascii=False) if isinstance(tr.output, dict) else str(tr.output)
+                "content": json_dumps_text(tr.output) if isinstance(tr.output, dict) else str(tr.output)
             })
     
     # 构建请求体
@@ -293,7 +305,7 @@ def openai_chat_resp_to_internal(resp: Dict[str, Any]) -> InternalChatResponse:
     for tc in message.get("tool_calls", []):
         args_str = tc.get("function", {}).get("arguments", "{}")
         try:
-            args = json.loads(args_str) if isinstance(args_str, str) else args_str
+            args = json_loads(args_str) if isinstance(args_str, str) else args_str
         except:
             args = {}
         
@@ -362,7 +374,7 @@ def internal_to_openai_resp(resp: InternalChatResponse) -> Dict[str, Any]:
                 "type": "function",
                 "function": {
                     "name": b.tool_call.name,
-                    "arguments": json.dumps(b.tool_call.arguments, ensure_ascii=False)
+                    "arguments": json_dumps_text(b.tool_call.arguments)
                 }
             })
     

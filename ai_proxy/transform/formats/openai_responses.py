@@ -1,7 +1,7 @@
 """
 OpenAI Responses API 格式转换
 """
-import json
+import orjson
 from typing import Dict, Any, List, Optional
 
 from ai_proxy.transform.formats.internal_models import (
@@ -14,6 +14,18 @@ from ai_proxy.transform.formats.internal_models import (
     InternalToolResult,
     InternalImageBlock,
 )
+
+
+def json_loads(s: str) -> Any:
+    return orjson.loads(s)
+
+
+def json_dumps(obj: Any) -> bytes:
+    return orjson.dumps(obj, option=orjson.OPT_NON_STR_KEYS)
+
+
+def json_dumps_text(obj: Any) -> str:
+    return json_dumps(obj).decode("utf-8")
 
 
 SUPPORTED_EVENT_TYPES = {
@@ -437,7 +449,7 @@ def _message_to_input_item(msg: InternalMessage) -> Dict[str, Any]:
                 "type": "function_call",
                 "call_id": block.tool_call.id,
                 "name": block.tool_call.name,
-                "arguments": json.dumps(block.tool_call.arguments, ensure_ascii=False),
+                "arguments": json_dumps_text(block.tool_call.arguments),
             }
         elif block.type == "tool_result" and block.tool_result:
             return {
@@ -483,7 +495,7 @@ def _message_to_output_items(msg: InternalMessage) -> List[Dict[str, Any]]:
                     "type": "function_call",
                     "call_id": block.tool_call.id,
                     "name": block.tool_call.name,
-                    "arguments": json.dumps(block.tool_call.arguments, ensure_ascii=False),
+                    "arguments": json_dumps_text(block.tool_call.arguments),
                 }
             )
         elif block.type == "tool_result" and block.tool_result:
@@ -518,7 +530,7 @@ def _safe_json_loads(data: Any) -> Dict[str, Any]:
         return data
     if isinstance(data, str):
         try:
-            return json.loads(data)
+            return json_loads(data)
         except Exception:
             return {}
     return {}

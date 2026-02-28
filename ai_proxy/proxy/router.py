@@ -2,8 +2,8 @@
 主路由处理模块 - 支持多来源格式和工具调用
 """
 
-import json
 import hashlib
+import orjson
 import threading
 import urllib.parse
 from typing import Optional, Tuple
@@ -28,6 +28,10 @@ def _url_cfg_cache_key(prefix: bytes, text: str) -> bytes:
     # Process-lifetime cache key; stable across the process (unlike built-in `hash()`),
     # collision probability negligible with 128-bit digest.
     return prefix + hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
+
+
+def json_loads(s: str) -> dict:
+    return orjson.loads(s)
 
 
 def parse_url_config(cfg_and_upstream: str) -> Tuple[dict, str]:
@@ -60,7 +64,7 @@ def parse_url_config(cfg_and_upstream: str) -> Tuple[dict, str]:
                 with _URL_CONFIG_PARSE_CACHE_LOCK:
                     config = _URL_CONFIG_PARSE_CACHE.get(cache_key)
                     if config is None:
-                        config = json.loads(config_str)
+                        config = json_loads(config_str)
                         _URL_CONFIG_PARSE_CACHE[cache_key] = config
         else:
             cache_key = _url_cfg_cache_key(b"U", cfg_part)
@@ -71,7 +75,7 @@ def parse_url_config(cfg_and_upstream: str) -> Tuple[dict, str]:
                     if config is None:
                         # URL编码的JSON配置
                         cfg_str = urllib.parse.unquote(cfg_part)
-                        config = json.loads(cfg_str)
+                        config = json_loads(cfg_str)
                         _URL_CONFIG_PARSE_CACHE[cache_key] = config
 
         # Avoid leaking accidental top-level mutations across requests.

@@ -1,7 +1,7 @@
 """
 Claude Chat 格式转换 - 支持工具调用
 """
-import json
+import orjson
 from typing import Dict, Any
 from ai_proxy.transform.formats.internal_models import (
     InternalChatRequest,
@@ -12,6 +12,18 @@ from ai_proxy.transform.formats.internal_models import (
     InternalToolCall,
     InternalToolResult
 )
+
+
+def json_loads(s: str) -> Any:
+    return orjson.loads(s)
+
+
+def json_dumps(obj: Any) -> bytes:
+    return orjson.dumps(obj, option=orjson.OPT_NON_STR_KEYS)
+
+
+def json_dumps_text(obj: Any) -> str:
+    return json_dumps(obj).decode("utf-8")
 
 
 def can_parse_claude_chat(path: str, headers: Dict[str, str], body: Dict[str, Any]) -> bool:
@@ -244,7 +256,7 @@ def to_claude_chat(req: InternalChatRequest) -> Dict[str, Any]:
                 if isinstance(result_content, str):
                     result_content = [{"type": "text", "text": result_content}]
                 elif isinstance(result_content, dict):
-                    result_content = [{"type": "text", "text": json.dumps(result_content, ensure_ascii=False)}]
+                    result_content = [{"type": "text", "text": json_dumps_text(result_content)}]
                 
                 content.append({
                     "type": "tool_result",
