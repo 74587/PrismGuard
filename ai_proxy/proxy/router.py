@@ -3,6 +3,8 @@
 """
 
 import json
+import hashlib
+import threading
 import urllib.parse
 from typing import Optional, Tuple
 from fastapi import APIRouter, Request, HTTPException
@@ -16,6 +18,16 @@ from ai_proxy.transform.formats.internal_models import InternalChatRequest
 from ai_proxy.proxy.upstream import UpstreamClient
 
 router = APIRouter()
+
+
+_URL_CONFIG_PARSE_CACHE: dict[bytes, dict] = {}
+_URL_CONFIG_PARSE_CACHE_LOCK = threading.Lock()
+
+
+def _url_cfg_cache_key(prefix: bytes, text: str) -> bytes:
+    # Process-lifetime cache key; stable across the process (unlike built-in `hash()`),
+    # collision probability negligible with 128-bit digest.
+    return prefix + hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
 
 
 def parse_url_config(cfg_and_upstream: str) -> Tuple[dict, str]:
@@ -41,13 +53,29 @@ def parse_url_config(cfg_and_upstream: str) -> Tuple[dict, str]:
             config_str = getattr(settings, env_key, None)
             if not config_str:
                 raise HTTPException(400, f"Environment variable {env_key} not found")
-            config = json.loads(config_str)
-        else:
-            # URL编码的JSON配置
-            cfg_str = urllib.parse.unquote(cfg_part)
-            config = json.loads(cfg_str)
 
-        return config, upstream
+            cache_key = _url_cfg_cache_key(b"E", env_key + "\0" + config_str)
+            config = _URL_CONFIG_PARSE_CACHE.get(cache_key)
+            if config is None:
+                with _URL_CONFIG_PARSE_CACHE_LOCK:
+                    config = _URL_CONFIG_PARSE_CACHE.get(cache_key)
+                    if config is None:
+                        config = json.loads(config_str)
+                        _URL_CONFIG_PARSE_CACHE[cache_key] = config
+        else:
+            cache_key = _url_cfg_cache_key(b"U", cfg_part)
+            config = _URL_CONFIG_PARSE_CACHE.get(cache_key)
+            if config is None:
+                with _URL_CONFIG_PARSE_CACHE_LOCK:
+                    config = _URL_CONFIG_PARSE_CACHE.get(cache_key)
+                    if config is None:
+                        # URL编码的JSON配置
+                        cfg_str = urllib.parse.unquote(cfg_part)
+                        config = json.loads(cfg_str)
+                        _URL_CONFIG_PARSE_CACHE[cache_key] = config
+
+        # Avoid leaking accidental top-level mutations across requests.
+        return config.copy(), upstream
     except HTTPException:
         raise
     except Exception as e:
