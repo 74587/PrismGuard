@@ -46,7 +46,11 @@ class Sample(BaseModel):
 
 
 # Global DB handle cache and per-db locks.
+# NOTE: Keep a single RocksDB handle per path. RocksDB uses a process-wide lock file,
+# and opening the same DB multiple times (even within the same process) can fail with
+# "lock held by current process" depending on backend behavior.
 _rocks_dbs: Dict[str, Rdict] = {}
+_rocks_modes: Dict[str, str] = {}  # "ro" | "rw"
 _rocks_locks: Dict[str, threading.RLock] = {}
 _global_lock = threading.Lock()
 
@@ -126,17 +130,29 @@ def _sample_to_json(sample: Sample, text_hash: str) -> str:
     return json_dumps_text(payload)
 
 
-def _db_cache_key(rocks_path: str, access_type: AccessType) -> str:
-    return f"{rocks_path}\0{repr(access_type)}"
-
-
-def _get_db_and_lock(rocks_path: str, access_type: AccessType) -> Tuple[Rdict, threading.RLock]:
+def _get_db_and_lock(rocks_path: str, read_only: bool) -> Tuple[Rdict, threading.RLock]:
     with _global_lock:
-        key = _db_cache_key(rocks_path, access_type)
-        if key not in _rocks_dbs:
-            _rocks_dbs[key] = Rdict(rocks_path, access_type=access_type)
-            _rocks_locks[key] = threading.RLock()
-        return _rocks_dbs[key], _rocks_locks[key]
+        existing = _rocks_dbs.get(rocks_path)
+        if existing is not None:
+            # If the DB is already open read-write, reuse it for all callers.
+            # If it's open read-only and a read-write handle is requested, reopen.
+            mode = _rocks_modes.get(rocks_path, "rw")
+            if mode == "rw" or read_only:
+                return existing, _rocks_locks[rocks_path]
+
+            # Upgrade ro -> rw.
+            try:
+                existing.close()
+            except Exception:
+                pass
+            _rocks_dbs.pop(rocks_path, None)
+            _rocks_modes.pop(rocks_path, None)
+
+        access_type = AccessType.read_only() if read_only else AccessType.read_write()
+        _rocks_dbs[rocks_path] = Rdict(rocks_path, access_type=access_type)
+        _rocks_modes[rocks_path] = "ro" if read_only else "rw"
+        _rocks_locks[rocks_path] = threading.RLock()
+        return _rocks_dbs[rocks_path], _rocks_locks[rocks_path]
 
 
 def cleanup_pools() -> None:
@@ -148,6 +164,7 @@ def cleanup_pools() -> None:
             except Exception:
                 pass
         _rocks_dbs.clear()
+        _rocks_modes.clear()
         _rocks_locks.clear()
 
 
@@ -169,8 +186,7 @@ class SampleStorage:
                     f"Read-only storage cannot migrate SQLite -> RocksDB; please migrate first: {sqlite_path}"
                 )
 
-        access_type = AccessType.read_only() if self.read_only else AccessType.read_write()
-        self.db, self._lock = _get_db_and_lock(self.rocks_path, access_type=access_type)
+        self.db, self._lock = _get_db_and_lock(self.rocks_path, read_only=self.read_only)
         if not self.read_only:
             self._init_meta()
 
