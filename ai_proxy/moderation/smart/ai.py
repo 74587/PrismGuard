@@ -66,6 +66,9 @@ def local_model_predict_proba(text: str, profile: ModerationProfile) -> float:
         else:
             from ai_proxy.moderation.smart.fasttext_model import fasttext_predict_proba
             return fasttext_predict_proba(text, profile)
+    elif model_type == LocalModelType.hashlinear:
+        from ai_proxy.moderation.smart.hashlinear_model import hashlinear_predict_proba
+        return hashlinear_predict_proba(text, profile)
     else:  # 默认使用 BoW
         from ai_proxy.moderation.smart.bow import bow_predict_proba
         return bow_predict_proba(text, profile)

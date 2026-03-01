@@ -36,6 +36,7 @@ class LocalModelType(str, Enum):
     """本地模型类型"""
     bow = "bow"
     fasttext = "fasttext"
+    hashlinear = "hashlinear"
 
 
 class SampleLoadingStrategy(str, Enum):
@@ -127,6 +128,34 @@ class BoWTrainingConfig(BaseModel):
     )
 
 
+class HashLinearTrainingConfig(BaseModel):
+    """Hashing + 线性模型训练配置（模型文件可极小，推理省资源）"""
+
+    min_samples: int = 200
+    retrain_interval_minutes: int = 60
+    max_samples: int = 50000
+    max_db_items: int = 100000
+
+    sample_loading: SampleLoadingStrategy = SampleLoadingStrategy.balanced_undersample
+
+    # 特征配置：HashingVectorizer（无词表，常量内存）
+    analyzer: str = "char"  # "char" / "word"
+    ngram_range: list = [2, 4]
+    n_features: int = 1_048_576  # 2^20 ~= 4MB(float32) / 8MB(float64)
+    alternate_sign: bool = False
+    norm: Optional[str] = "l2"
+
+    # 训练配置：SGD logistic regression（支持 partial_fit 增量训练）
+    alpha: float = 1e-5
+    epochs: int = 3
+    batch_size: int = 2048
+    random_seed: int = 42
+    max_seconds: int = 300
+
+    # 仅 analyzer="word" 时可选启用 jieba 分词（最小化接入：默认关闭）
+    use_jieba: bool = False
+
+
 class ProfileConfig(BaseModel):
     """配置文件结构"""
     ai: AIConfig = AIConfig()
@@ -139,6 +168,7 @@ class ProfileConfig(BaseModel):
     # 各模型的训练配置
     bow_training: BoWTrainingConfig = BoWTrainingConfig()
     fasttext_training: FastTextTrainingConfig = FastTextTrainingConfig()
+    hashlinear_training: HashLinearTrainingConfig = HashLinearTrainingConfig()
 
 
 class ModerationProfile:
@@ -204,6 +234,10 @@ class ModerationProfile:
     def get_fasttext_model_path(self) -> str:
         """获取 fastText 模型路径"""
         return os.path.join(self.base_dir, "fasttext_model.bin")
+
+    def get_hashlinear_model_path(self) -> str:
+        """获取 HashLinear 模型路径"""
+        return os.path.join(self.base_dir, "hashlinear_model.pkl")
     
     def bow_model_exists(self) -> bool:
         """检查词袋模型是否存在"""
@@ -213,11 +247,17 @@ class ModerationProfile:
     def fasttext_model_exists(self) -> bool:
         """检查 fastText 模型是否存在"""
         return os.path.exists(self.get_fasttext_model_path())
+
+    def hashlinear_model_exists(self) -> bool:
+        """检查 HashLinear 模型是否存在"""
+        return os.path.exists(self.get_hashlinear_model_path())
     
     def local_model_exists(self) -> bool:
         """检查本地模型是否存在（根据配置的模型类型）"""
         if self.config.local_model_type == LocalModelType.fasttext:
             return self.fasttext_model_exists()
+        if self.config.local_model_type == LocalModelType.hashlinear:
+            return self.hashlinear_model_exists()
         else:
             return self.bow_model_exists()
 

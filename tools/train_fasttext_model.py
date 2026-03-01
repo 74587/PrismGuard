@@ -38,6 +38,10 @@ def _acquire_global_lock(lock_file) -> None:
     if fcntl is not None:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         return
+    # Windows: msvcrt.locking requires locking a non-empty region.
+    lock_file.seek(0)
+    lock_file.write("0")
+    lock_file.flush()
     lock_file.seek(0)
     msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
 

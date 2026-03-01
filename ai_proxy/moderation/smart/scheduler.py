@@ -68,11 +68,14 @@ def _resolve_training_script(profile: ModerationProfile) -> str:
     """
     根据 profile 配置选择训练脚本：
     - fastText：统一用 tools/train_fasttext_model.py（内部会按 use_jieba/use_tiktoken 自动选择）
+    - HashLinear：tools/train_hashlinear_model.py
     - BoW：tools/train_bow_model.py
     """
     root = _project_root_dir()
     if profile.config.local_model_type == LocalModelType.fasttext:
         return os.path.join(root, "tools", "train_fasttext_model.py")
+    if profile.config.local_model_type == LocalModelType.hashlinear:
+        return os.path.join(root, "tools", "train_hashlinear_model.py")
     return os.path.join(root, "tools", "train_bow_model.py")
 
 
@@ -117,6 +120,9 @@ def should_train(profile: ModerationProfile) -> bool:
     if model_type == LocalModelType.fasttext:
         cfg = profile.config.fasttext_training
         model_path = profile.get_fasttext_model_path()
+    elif model_type == LocalModelType.hashlinear:
+        cfg = profile.config.hashlinear_training
+        model_path = profile.get_hashlinear_model_path()
     else:
         cfg = profile.config.bow_training
         model_path = profile.get_model_path()
