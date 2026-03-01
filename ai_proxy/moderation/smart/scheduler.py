@@ -78,6 +78,29 @@ def _resolve_training_script(profile: ModerationProfile) -> str:
         return os.path.join(root, "tools", "train_hashlinear_model.py")
     return os.path.join(root, "tools", "train_bow_model.py")
 
+def _max_db_items_for_profile(profile: ModerationProfile) -> int:
+    """根据当前 local_model_type 返回训练前清理所需的 max_db_items。"""
+    model_type = profile.config.local_model_type
+    if model_type == LocalModelType.fasttext:
+        return int(profile.config.fasttext_training.max_db_items)
+    if model_type == LocalModelType.hashlinear:
+        return int(profile.config.hashlinear_training.max_db_items)
+    return int(profile.config.bow_training.max_db_items)
+
+
+def _cleanup_samples_before_training(profile: ModerationProfile) -> None:
+    """
+    训练前清理样本库（写操作），在主进程执行一次。
+
+    说明：训练子进程会以 read-only 打开 RocksDB，避免与主进程持锁冲突；
+    因此清理职责需要放到主进程执行。
+    """
+    max_db_items = _max_db_items_for_profile(profile)
+    if max_db_items <= 0:
+        return
+    storage = SampleStorage(profile.get_db_path(), read_only=False)
+    storage.cleanup_excess_samples(max_db_items)
+
 
 async def _run_training_subprocess(profile: ModerationProfile) -> int:
     """
@@ -179,6 +202,8 @@ async def train_all_profiles():
             print(f"[SCHEDULER] 开始训练: {profile_name} (模型类型={model_type.value})")
 
             async with lock:
+                # 训练前做一次数据库清理（主进程写入）
+                _cleanup_samples_before_training(profile)
                 rc = await _run_training_subprocess(profile)
 
             if rc == 0:
