@@ -96,7 +96,7 @@ def main() -> None:
         print(f"   先训练: python tools/train_hashlinear_model.py {args.profile_name}")
         sys.exit(1)
 
-    storage = SampleStorage(profile.get_db_path())
+    storage = SampleStorage(profile.get_db_path(), read_only=True)
     total = storage.get_sample_count()
     if total == 0:
         print("❌ 数据库中没有样本")

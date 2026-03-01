@@ -93,7 +93,7 @@ def evaluate_fasttext_model(profile_name: str, sample_size: int = 100):
     print(f"✅ 分词方式: {tokenize_mode}")
     
     # 加载数据库样本
-    storage = SampleStorage(profile.get_db_path())
+    storage = SampleStorage(profile.get_db_path(), read_only=True)
     total_count = storage.get_sample_count()
     
     if total_count == 0:

@@ -67,7 +67,7 @@ def evaluate_bow_model(profile_name: str, sample_size: int = 100):
     print(f"✅ 向量化器: {profile.get_vectorizer_path()}")
     
     # 加载数据库样本
-    storage = SampleStorage(profile.get_db_path())
+    storage = SampleStorage(profile.get_db_path(), read_only=True)
     total_count = storage.get_sample_count()
     
     if total_count == 0:

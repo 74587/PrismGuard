@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Tuple
 
 import orjson
 from pydantic import BaseModel
-from rocksdict import Rdict
+from rocksdict import Rdict, AccessType
 
 
 def json_loads(s: str) -> dict:
@@ -126,12 +126,17 @@ def _sample_to_json(sample: Sample, text_hash: str) -> str:
     return json_dumps_text(payload)
 
 
-def _get_db_and_lock(rocks_path: str) -> Tuple[Rdict, threading.RLock]:
+def _db_cache_key(rocks_path: str, access_type: AccessType) -> str:
+    return f"{rocks_path}\0{repr(access_type)}"
+
+
+def _get_db_and_lock(rocks_path: str, access_type: AccessType) -> Tuple[Rdict, threading.RLock]:
     with _global_lock:
-        if rocks_path not in _rocks_dbs:
-            _rocks_dbs[rocks_path] = Rdict(rocks_path)
-            _rocks_locks[rocks_path] = threading.RLock()
-        return _rocks_dbs[rocks_path], _rocks_locks[rocks_path]
+        key = _db_cache_key(rocks_path, access_type)
+        if key not in _rocks_dbs:
+            _rocks_dbs[key] = Rdict(rocks_path, access_type=access_type)
+            _rocks_locks[key] = threading.RLock()
+        return _rocks_dbs[key], _rocks_locks[key]
 
 
 def cleanup_pools() -> None:
@@ -149,12 +154,25 @@ def cleanup_pools() -> None:
 class SampleStorage:
     """Sample storage manager (RocksDB backend)."""
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, read_only: bool = False):
         self.db_path = db_path
         self.rocks_path = _rocks_path_from_db_path(db_path)
-        self._migrate_sqlite_if_needed()
-        self.db, self._lock = _get_db_and_lock(self.rocks_path)
-        self._init_meta()
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            self._migrate_sqlite_if_needed()
+        else:
+            # In read-only mode, do not attempt migration (requires writes).
+            sqlite_path = Path(self.db_path)
+            rocks_path = Path(self.rocks_path)
+            if sqlite_path.exists() and not rocks_path.exists():
+                raise RuntimeError(
+                    f"Read-only storage cannot migrate SQLite -> RocksDB; please migrate first: {sqlite_path}"
+                )
+
+        access_type = AccessType.read_only() if self.read_only else AccessType.read_write()
+        self.db, self._lock = _get_db_and_lock(self.rocks_path, access_type=access_type)
+        if not self.read_only:
+            self._init_meta()
 
     def _init_meta(self) -> None:
         with self._lock:
@@ -255,6 +273,8 @@ class SampleStorage:
         self.db["meta:count:1"] = str(count_1)
 
     def save_sample(self, text: str, label: int, category: Optional[str] = None):
+        if self.read_only:
+            raise RuntimeError("SampleStorage is read-only; save_sample() is not allowed")
         with self._lock:
             sid = self._next_id()
             created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -447,6 +467,9 @@ class SampleStorage:
             return self._get_label_count(0), self._get_label_count(1)
 
     def cleanup_excess_samples(self, max_items: int):
+        if self.read_only:
+            print(f"[DB清理] 当前为只读模式，跳过清理（max_items={max_items}）")
+            return
         total = self.get_sample_count()
         if total <= max_items:
             print(f"[DB清理] 总样本数 {total} <= {max_items}，无需清理")

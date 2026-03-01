@@ -42,7 +42,7 @@ def evaluate_hashlinear_model(profile_name: str, sample_size: int = 100):
 
     print(f"✅ 模型文件: {profile.get_hashlinear_model_path()}")
 
-    storage = SampleStorage(profile.get_db_path())
+    storage = SampleStorage(profile.get_db_path(), read_only=True)
     total_count = storage.get_sample_count()
     if total_count == 0:
         print("❌ 数据库中没有样本")
@@ -130,4 +130,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

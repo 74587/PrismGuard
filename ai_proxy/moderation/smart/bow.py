@@ -121,7 +121,8 @@ def train_bow_model(profile: ModerationProfile):
     except Exception as e:
         print(f"[BOW] 无法调整进程优先级: {e}")
     
-    storage = SampleStorage(profile.get_db_path())
+    # Read-only mode: allow training while main service holds RocksDB write lock.
+    storage = SampleStorage(profile.get_db_path(), read_only=True)
     cfg = profile.config.bow_training
     
     # 数据库清理

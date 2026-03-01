@@ -103,7 +103,8 @@ def train_fasttext_model_jieba(profile: ModerationProfile):
     except Exception as e:
         print(f"[FastText-Jieba] 无法调整进程优先级: {e}")
     
-    storage = SampleStorage(profile.get_db_path())
+    # Read-only mode: allow training while main service holds RocksDB write lock.
+    storage = SampleStorage(profile.get_db_path(), read_only=True)
     cfg = profile.config.fasttext_training
     
     # 数据库清理

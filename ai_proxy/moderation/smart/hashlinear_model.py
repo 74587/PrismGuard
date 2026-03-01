@@ -134,7 +134,8 @@ def train_hashlinear_model(profile: ModerationProfile) -> None:
     except Exception as e:
         print(f"[HashLinear] 无法调整进程优先级: {e}")
 
-    storage = SampleStorage(profile.get_db_path())
+    # Read-only mode: allow training while main service holds RocksDB write lock.
+    storage = SampleStorage(profile.get_db_path(), read_only=True)
     cfg_obj = profile.config.hashlinear_training
 
     storage.cleanup_excess_samples(cfg_obj.max_db_items)
