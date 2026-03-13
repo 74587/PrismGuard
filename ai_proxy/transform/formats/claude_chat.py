@@ -62,7 +62,8 @@ def can_parse_claude_chat(path: str, headers: Dict[str, str], body: Dict[str, An
         return True
     
     # 3. 检查 Claude Chat 的 body 结构
-    if "messages" in body and isinstance(body["messages"], list):
+    # Some wrappers may JSON-stringify the messages list (e.g. "messages": "[{...}]").
+    if "messages" in body and isinstance(body["messages"], (list, str)):
         return True
         
     # 4. 检查 Claude Code (Agent SDK) 的 body 结构
@@ -143,7 +144,14 @@ def _from_claude_chat(body: Dict[str, Any]) -> InternalChatRequest:
                 content=[InternalContentBlock(type="text", text=system_text)]
             ))
     
-    for msg in body.get("messages", []):
+    raw_messages = body.get("messages", [])
+    if isinstance(raw_messages, str):
+        try:
+            raw_messages = json_loads(raw_messages)
+        except Exception:
+            raw_messages = []
+
+    for msg in raw_messages:
         blocks = []
         content_parts = msg.get("content", [])
         
