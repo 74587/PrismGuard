@@ -75,7 +75,7 @@ htmlcov/
 .dmypy.json
 dmypy.json
 
-
+real_tests
 ___*
 
 # Test files with sensitive data (API keys, tokens, etc.)
@@ -83,3 +83,9 @@ tests_private/
 test_keys/
 *_test_with_key.py
 *_private_test.py
+*venv*
+
+# Real/E2E tests (local-only)
+tests_real/
+.real_tests/
+real_tests.local/
