@@ -1,9 +1,62 @@
 """
 格式解析器 - 支持多来源自动检测
 """
+import hashlib
+import threading
+from collections import OrderedDict
 from typing import Dict, Any, Optional, Tuple, List, Protocol
+
+import orjson
 from ai_proxy.transform.formats.internal_models import InternalChatRequest, InternalChatResponse
 from ai_proxy.transform.formats import openai_chat, claude_chat, openai_responses, gemini_chat
+
+
+_DETECT_AND_PARSE_CACHE_MAXSIZE = 30
+_DETECT_AND_PARSE_CACHE: "OrderedDict[bytes, Tuple[Optional[str], Optional[InternalChatRequest], Optional[str]]]" = (
+    OrderedDict()
+)
+_DETECT_AND_PARSE_CACHE_LOCK = threading.Lock()
+
+
+def _make_json_safe(value: Any, _seen: Optional[set[int]] = None) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if _seen is None:
+        _seen = set()
+
+    value_id = id(value)
+    if value_id in _seen:
+        return repr(value)
+    _seen.add(value_id)
+
+    if isinstance(value, (list, tuple)):
+        return [_make_json_safe(v, _seen) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _make_json_safe(v, _seen) for k, v in value.items()}
+
+    return repr(value)
+
+
+def _detect_and_parse_cache_key(
+    config_from: Any,
+    path: str,
+    headers: Dict[str, str],
+    body: Dict[str, Any],
+    strict_parse: bool,
+    disable_tools: bool,
+) -> bytes:
+    headers_norm = {str(k).lower(): str(v) for k, v in headers.items()}
+    payload = {
+        "config_from": _make_json_safe(config_from),
+        "path": path,
+        "headers": _make_json_safe(headers_norm),
+        "body": _make_json_safe(body),
+        "strict_parse": strict_parse,
+        "disable_tools": disable_tools,
+    }
+    dumped = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
+    return hashlib.blake2b(dumped, digest_size=16).digest()
 
 
 class FormatParser(Protocol):
@@ -190,6 +243,25 @@ def detect_and_parse(
     Returns:
         (格式名称, 内部请求对象, 错误消息) 或 (None, None, 错误消息) 表示无法识别
     """
+    cache_key = _detect_and_parse_cache_key(
+        config_from=config_from,
+        path=path,
+        headers=headers,
+        body=body,
+        strict_parse=strict_parse,
+        disable_tools=disable_tools,
+    )
+    cached: Optional[Tuple[Optional[str], Optional[InternalChatRequest], Optional[str]]] = None
+    with _DETECT_AND_PARSE_CACHE_LOCK:
+        cached = _DETECT_AND_PARSE_CACHE.get(cache_key)
+        if cached is not None:
+            _DETECT_AND_PARSE_CACHE.move_to_end(cache_key)
+    if cached is not None:
+        cached_name, cached_internal, cached_err = cached
+        if cached_internal is not None:
+            return cached_name, cached_internal.model_copy(deep=True), cached_err
+        return cached_name, None, cached_err
+
     # 1. 如果禁用工具，排除仅支持工具的格式
     if disable_tools:
         tool_only_formats = []
@@ -228,7 +300,21 @@ def detect_and_parse(
                 if disable_tools:
                     internal = _filter_tools(internal)
 
-                return name, internal, None
+                result: Tuple[Optional[str], Optional[InternalChatRequest], Optional[str]] = (
+                    name,
+                    internal,
+                    None,
+                )
+                with _DETECT_AND_PARSE_CACHE_LOCK:
+                    _DETECT_AND_PARSE_CACHE[cache_key] = (
+                        result[0],
+                        result[1].model_copy(deep=True) if result[1] is not None else None,
+                        result[2],
+                    )
+                    _DETECT_AND_PARSE_CACHE.move_to_end(cache_key)
+                    while len(_DETECT_AND_PARSE_CACHE) > _DETECT_AND_PARSE_CACHE_MAXSIZE:
+                        _DETECT_AND_PARSE_CACHE.popitem(last=False)
+                return result
         except Exception as e:
             # 解析失败，记录错误并继续尝试下一个
             error_detail = f"{name}: {type(e).__name__}: {e}"
@@ -267,6 +353,11 @@ def detect_and_parse(
             # 如果有解析错误，附加到错误消息中
             if parse_errors:
                 error_msg += f" Parse errors: {'; '.join(parse_errors)}"
+            with _DETECT_AND_PARSE_CACHE_LOCK:
+                _DETECT_AND_PARSE_CACHE[cache_key] = (None, None, error_msg)
+                _DETECT_AND_PARSE_CACHE.move_to_end(cache_key)
+                while len(_DETECT_AND_PARSE_CACHE) > _DETECT_AND_PARSE_CACHE_MAXSIZE:
+                    _DETECT_AND_PARSE_CACHE.popitem(last=False)
             return None, None, error_msg
         else:
             # 没有任何格式可以解析
@@ -277,9 +368,19 @@ def detect_and_parse(
             )
             if parse_errors:
                 error_msg += f" Parse errors: {'; '.join(parse_errors)}"
+            with _DETECT_AND_PARSE_CACHE_LOCK:
+                _DETECT_AND_PARSE_CACHE[cache_key] = (None, None, error_msg)
+                _DETECT_AND_PARSE_CACHE.move_to_end(cache_key)
+                while len(_DETECT_AND_PARSE_CACHE) > _DETECT_AND_PARSE_CACHE_MAXSIZE:
+                    _DETECT_AND_PARSE_CACHE.popitem(last=False)
             return None, None, error_msg
     
     # 非严格模式：返回 None 表示无法识别（将透传）
+    with _DETECT_AND_PARSE_CACHE_LOCK:
+        _DETECT_AND_PARSE_CACHE[cache_key] = (None, None, None)
+        _DETECT_AND_PARSE_CACHE.move_to_end(cache_key)
+        while len(_DETECT_AND_PARSE_CACHE) > _DETECT_AND_PARSE_CACHE_MAXSIZE:
+            _DETECT_AND_PARSE_CACHE.popitem(last=False)
     return None, None, None
 
 
