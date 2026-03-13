@@ -397,12 +397,17 @@ class _ResponsesSink(_InternalStreamSink):
         return [_encode_sse("[DONE]")]
 
     def _response_stub(self, status: str) -> dict:
+        now = int(time.time())
         return {
             "object": "response",
             "id": self.response_id or "",
             "model": self.model or "",
-            "created_at": self.created_at or int(time.time()),
+            "created_at": self.created_at or now,
+            # Per Responses schema, `error` and `incomplete_details` are required (nullable).
+            "error": None,
+            "incomplete_details": None,
             "status": status,
+            "completed_at": now if status == "completed" else None,
             "output": [],
             # Required by OpenAI Responses schema / official SDK.
             "parallel_tool_calls": False,
