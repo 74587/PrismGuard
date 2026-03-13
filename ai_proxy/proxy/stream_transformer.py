@@ -707,6 +707,14 @@ def _decode_to_internal(
             return []
         resp = event.get("response") or {}
         item_map = seen_tool_calls.setdefault("__responses_item_id_map__", {})
+        pending_by_call = seen_tool_calls.setdefault("__responses_pending_args__", {})
+        pending_by_item_id = seen_tool_calls.setdefault("__responses_pending_args_by_item_id__", {})
+        if not isinstance(pending_by_call, dict):
+            pending_by_call = {}
+            seen_tool_calls["__responses_pending_args__"] = pending_by_call
+        if not isinstance(pending_by_item_id, dict):
+            pending_by_item_id = {}
+            seen_tool_calls["__responses_pending_args_by_item_id__"] = pending_by_item_id
         if etype in {"response.created", "response.in_progress"}:
             meta["id"] = resp.get("id", meta.get("id"))
             meta["model"] = resp.get("model", meta.get("model"))
@@ -726,25 +734,81 @@ def _decode_to_internal(
                 item_id = item.get("id") or ""
                 call_id = item.get("call_id") or item_id or ""
                 name = item.get("name") or ""
-                if call_id and call_id not in seen_tool_calls:
-                    seen_tool_calls[call_id] = {"name": name}
-                    outs.append({"type": "tool_call_start", "id": call_id, "name": name})
+                if call_id:
+                    entry = seen_tool_calls.setdefault(call_id, {"name": ""})
+                    if name and isinstance(entry, dict):
+                        entry["name"] = name
                 if item_id and isinstance(item_map, dict):
                     item_map[item_id] = call_id
+                # If we buffered deltas by item_id before we knew the call_id, move them over now.
+                if item_id and call_id:
+                    pending_item = pending_by_item_id.get(item_id)
+                    if isinstance(pending_item, list) and pending_item:
+                        pending_by_call.setdefault(call_id, [])
+                        if isinstance(pending_by_call.get(call_id), list):
+                            pending_by_call[call_id].extend(pending_item)
+                        pending_by_item_id[item_id] = []
+                # If we already buffered args deltas for this call before we knew the name, flush now.
+                if call_id:
+                    pending = pending_by_call.get(call_id)
+                    if isinstance(pending, list) and pending:
+                        name2 = (seen_tool_calls.get(call_id, {}) or {}).get("name") or name
+                        if name2:
+                            outs.append({"type": "tool_call_start", "id": call_id, "name": name2})
+                            for d in pending:
+                                outs.append({"type": "tool_call_args_delta", "id": call_id, "name": name2, "delta": d})
+                            pending_by_call[call_id] = []
+                    else:
+                        # If we have name, we can start immediately.
+                        name2 = (seen_tool_calls.get(call_id, {}) or {}).get("name") or name
+                        if name2 and call_id and call_id not in seen_tool_calls.get("__responses_started__", {}):
+                            started = seen_tool_calls.setdefault("__responses_started__", {})
+                            if isinstance(started, dict) and not started.get(call_id):
+                                started[call_id] = True
+                                outs.append({"type": "tool_call_start", "id": call_id, "name": name2})
             return outs
 
         if etype in {"response.function_call_arguments.delta", "response.function_call_arguments.done", "response.function_call.delta"}:
             item_id = event.get("item_id") or ""
-            call_id = ""
-            if item_id and isinstance(item_map, dict):
+            call_id = event.get("call_id") or ""
+            if not call_id and item_id and isinstance(item_map, dict):
                 call_id = item_map.get(item_id, "") or ""
-            name = seen_tool_calls.get(call_id, {}).get("name") or ""
+            name = event.get("name") or (seen_tool_calls.get(call_id, {}) or {}).get("name") or ""
             delta_args = event.get("delta") or event.get("arguments") or ""
-            if call_id and call_id not in seen_tool_calls:
-                seen_tool_calls[call_id] = {"name": name}
-                outs.append({"type": "tool_call_start", "id": call_id, "name": name})
-            if delta_args and call_id:
-                outs.append({"type": "tool_call_args_delta", "id": call_id, "name": name, "delta": delta_args})
+
+            if not delta_args:
+                return outs
+            if not call_id:
+                # We may not know call_id yet (some streams send args before output_item.added).
+                # Buffer by item_id so we can replay once output_item.added provides call_id+name.
+                if item_id:
+                    pending_by_item_id.setdefault(item_id, [])
+                    if isinstance(pending_by_item_id.get(item_id), list):
+                        pending_by_item_id[item_id].append(delta_args)
+                return outs
+
+            entry = seen_tool_calls.setdefault(call_id, {"name": ""})
+            if name and isinstance(entry, dict) and not entry.get("name"):
+                entry["name"] = name
+
+            started = seen_tool_calls.setdefault("__responses_started__", {})
+            if not isinstance(started, dict):
+                started = {}
+                seen_tool_calls["__responses_started__"] = started
+
+            name2 = (seen_tool_calls.get(call_id, {}) or {}).get("name") or name
+            if started.get(call_id):
+                outs.append({"type": "tool_call_args_delta", "id": call_id, "name": name2, "delta": delta_args})
+            else:
+                # Don't emit tool_call_start without a name; buffer until we see output_item.added.
+                if name2:
+                    started[call_id] = True
+                    outs.append({"type": "tool_call_start", "id": call_id, "name": name2})
+                    outs.append({"type": "tool_call_args_delta", "id": call_id, "name": name2, "delta": delta_args})
+                else:
+                    pending_by_call.setdefault(call_id, [])
+                    if isinstance(pending_by_call.get(call_id), list):
+                        pending_by_call[call_id].append(delta_args)
             return outs
 
         if etype in {"response.completed", "response.failed", "response.incomplete", "error"}:
