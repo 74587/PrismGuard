@@ -24,20 +24,24 @@ def json_dumps(obj: Any) -> bytes:
 
 
 def _encode_sse(data: str | bytes, event: Optional[str] = None) -> bytes:
+    """
+    Encode a single SSE frame.
+
+    IMPORTANT: SSE `data:` fields must be line-oriented. If the payload contains newline characters,
+    each line must be prefixed with `data:` (spec behavior). Some official SDK decoders will fail
+    if we emit a multi-line JSON payload as a single `data:` line.
+    """
     if isinstance(data, bytes):
-        if event:
-            return (
-                b"event: "
-                + event.encode("utf-8")
-                + b"\n"
-                + b"data: "
-                + data
-                + b"\n\n"
-            )
-        return b"data: " + data + b"\n\n"
-    if event:
-        return f"event: {event}\ndata: {data}\n\n".encode("utf-8")
-    return f"data: {data}\n\n".encode("utf-8")
+        lines = data.split(b"\n")
+        head = (b"event: " + event.encode("utf-8") + b"\n") if event else b""
+        body = b"".join(b"data: " + line + b"\n" for line in lines)
+        return head + body + b"\n"
+
+    # str
+    lines_s = data.split("\n")
+    head_s = f"event: {event}\n" if event else ""
+    body_s = "".join(f"data: {line}\n" for line in lines_s)
+    return (head_s + body_s + "\n").encode("utf-8")
 
 
 def _encode_json(payload: dict, event: Optional[str] = None) -> bytes:
