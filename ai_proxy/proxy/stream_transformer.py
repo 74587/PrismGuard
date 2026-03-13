@@ -653,15 +653,45 @@ def _decode_to_internal(
         if content:
             outs.append({"type": "text_delta", "text": content})
 
+        # OpenAI Chat streaming tool_calls can omit `id`/`name` on later chunks and only provide
+        # {index, function:{arguments: "...partial..."}}. Track by `index` for robust accumulation.
+        index_map = seen_tool_calls.setdefault("__openai_chat_tool_index_map__", {})
+        if not isinstance(index_map, dict):
+            index_map = {}
+            seen_tool_calls["__openai_chat_tool_index_map__"] = index_map
+
         for tc in delta.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            idx = tc.get("index")
             call_id = tc.get("id") or ""
             fn = tc.get("function") or {}
+            if not isinstance(fn, dict):
+                fn = {}
             name = fn.get("name") or ""
             args = fn.get("arguments") or ""
+
+            if idx is not None:
+                try:
+                    idx_key = int(idx)
+                except Exception:
+                    idx_key = None
+                if idx_key is not None:
+                    if call_id:
+                        index_map[idx_key] = call_id
+                    elif idx_key in index_map:
+                        call_id = index_map.get(idx_key) or ""
+
+            if call_id and not name:
+                name = seen_tool_calls.get(call_id, {}).get("name") or ""
+
             if call_id and call_id not in seen_tool_calls:
                 seen_tool_calls[call_id] = {"name": name}
                 outs.append({"type": "tool_call_start", "id": call_id, "name": name})
-            if args:
+            elif call_id and name and seen_tool_calls.get(call_id, {}).get("name") != name:
+                seen_tool_calls.setdefault(call_id, {})["name"] = name
+
+            if args and call_id:
                 outs.append({"type": "tool_call_args_delta", "id": call_id, "name": name, "delta": args})
 
         finish_reason = choice.get("finish_reason")
