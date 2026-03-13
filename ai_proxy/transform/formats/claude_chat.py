@@ -117,11 +117,30 @@ def _from_claude_chat(body: Dict[str, Any]) -> InternalChatRequest:
     """从标准 Claude Chat 格式转换"""
     tools = []
     for t in body.get("tools", []):
-        tools.append(InternalTool(
-            name=t["name"],
-            description=t.get("description"),
-            input_schema=t.get("input_schema", {})
-        ))
+        if not isinstance(t, dict):
+            continue
+        # Prefer Anthropic Messages tool shape:
+        # {"name": "...", "description": "...", "input_schema": {...}}
+        # But tolerate OpenAI-like wrappers that embed function metadata:
+        # {"type":"function","function":{"name":"...","description":"...","parameters":{...}}}
+        fn = t.get("function") if isinstance(t.get("function"), dict) else {}
+        name = t.get("name") or (fn.get("name") if isinstance(fn, dict) else None)
+        if not name:
+            # Some tool entries may be non-function tool types or malformed; skip instead of crashing.
+            continue
+        description = t.get("description")
+        if description is None and isinstance(fn, dict):
+            description = fn.get("description")
+        input_schema = t.get("input_schema")
+        if input_schema is None and isinstance(fn, dict):
+            input_schema = fn.get("parameters")
+        tools.append(
+            InternalTool(
+                name=name,
+                description=description,
+                input_schema=input_schema or {},
+            )
+        )
     
     messages = []
     system_content = body.get("system")
