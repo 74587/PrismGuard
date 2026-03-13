@@ -232,6 +232,9 @@ class _ResponsesSink(_InternalStreamSink):
         self._msg_item_id = "msg_stream_0"
         self._msg_content_index = 0
         self._tool_item_ids: Dict[str, str] = {}  # call_id -> item_id
+        self._next_output_index = 0
+        self._msg_output_index: Optional[int] = None
+        self._tool_output_indices: Dict[str, int] = {}  # call_id -> output_index
 
     def on_start(self, meta: Dict[str, Any]) -> List[bytes]:
         self.response_id = meta.get("id") or self.response_id or ""
@@ -244,45 +247,64 @@ class _ResponsesSink(_InternalStreamSink):
 
         # Compatibility target:
         # - official OpenAI Python SDK `ResponseStreamState` accumulator
-        # - formatpack docs (response.output_item.added -> response.content_part.added -> response.output_text.delta)
+        # - formatpack docs: only emit output_item/content_part when we actually have something
+        #   (tool call and/or text). Emitting a never-closed empty message item breaks stricter clients.
         outs: List[bytes] = []
         for payload in [
             {"type": "response.created", "sequence_number": self._next_seq(), "response": resp},
             {"type": "response.in_progress", "sequence_number": self._next_seq(), "response": resp},
-            {
-                "type": "response.output_item.added",
-                "sequence_number": self._next_seq(),
-                "output_index": 0,
-                "item": {
-                    "type": "message",
-                    "id": self._msg_item_id,
-                    "role": "assistant",
-                    "status": "in_progress",
-                    "content": [],
-                },
-            },
-            {
-                "type": "response.content_part.added",
-                "sequence_number": self._next_seq(),
-                "output_index": 0,
-                "item_id": self._msg_item_id,
-                "content_index": self._msg_content_index,
-                "part": {"type": "output_text", "text": "", "annotations": []},
-            },
         ]:
             outs.append(_encode_json(payload, event=payload["type"]))
         return outs
+
+    def _ensure_message_started(self) -> List[bytes]:
+        if self._msg_output_index is not None:
+            return []
+        self._msg_output_index = int(self._next_output_index)
+        self._next_output_index += 1
+        out_index = int(self._msg_output_index)
+        return [
+            _encode_json(
+                {
+                    "type": "response.output_item.added",
+                    "sequence_number": self._next_seq(),
+                    "output_index": out_index,
+                    "item": {
+                        "type": "message",
+                        "id": self._msg_item_id,
+                        "role": "assistant",
+                        "status": "in_progress",
+                        "content": [],
+                    },
+                },
+                event="response.output_item.added",
+            ),
+            _encode_json(
+                {
+                    "type": "response.content_part.added",
+                    "sequence_number": self._next_seq(),
+                    "output_index": out_index,
+                    "item_id": self._msg_item_id,
+                    "content_index": self._msg_content_index,
+                    "part": {"type": "output_text", "text": "", "annotations": []},
+                },
+                event="response.content_part.added",
+            ),
+        ]
 
     def on_text_delta(self, text: str) -> List[bytes]:
         if not text:
             return []
         self._text_buf.append(text)
-        return [
+        out: List[bytes] = []
+        out.extend(self._ensure_message_started())
+        out_index = int(self._msg_output_index or 0)
+        out.append(
             _encode_json(
                 {
                     "type": "response.output_text.delta",
                     "sequence_number": self._next_seq(),
-                    "output_index": 0,
+                    "output_index": out_index,
                     "item_id": self._msg_item_id,
                     "content_index": self._msg_content_index,
                     "delta": text,
@@ -290,22 +312,29 @@ class _ResponsesSink(_InternalStreamSink):
                 ,
                 event="response.output_text.delta",
             )
-        ]
+        )
+        return out
 
     def on_tool_call_start(self, call_id: str, name: str) -> List[bytes]:
+        if not call_id:
+            return []
         if call_id:
             self._tool_calls.setdefault(call_id, {"name": name or "", "arguments": ""})
             if name:
                 self._tool_calls[call_id]["name"] = name
             self._tool_item_ids.setdefault(call_id, f"fc_{len(self._tool_item_ids)}")
+            if call_id not in self._tool_output_indices:
+                self._tool_output_indices[call_id] = int(self._next_output_index)
+                self._next_output_index += 1
         item_id = self._tool_item_ids.get(call_id, f"fc_{len(self._tool_item_ids)}")
         self._tool_item_ids[call_id] = item_id
+        out_index = int(self._tool_output_indices.get(call_id, 0))
         return [
             _encode_json(
                 {
                     "type": "response.output_item.added",
                     "sequence_number": self._next_seq(),
-                    "output_index": 1,
+                    "output_index": out_index,
                     "item": {
                         "type": "function_call",
                         "id": item_id,
@@ -323,56 +352,146 @@ class _ResponsesSink(_InternalStreamSink):
     def on_tool_call_args_delta(self, call_id: str, name: str, delta: str) -> List[bytes]:
         if not delta:
             return []
+        out: List[bytes] = []
+        if call_id and call_id not in self._tool_item_ids:
+            # Some streams can surface args deltas before we see a call-start signal.
+            out.extend(self.on_tool_call_start(call_id=call_id, name=name))
         if call_id:
             self._tool_calls.setdefault(call_id, {"name": name or "", "arguments": ""})
             if name:
                 self._tool_calls[call_id]["name"] = name
             self._tool_calls[call_id]["arguments"] = self._tool_calls[call_id].get("arguments", "") + (delta or "")
         item_id = self._tool_item_ids.get(call_id, "")
-        return [
+        out_index = int(self._tool_output_indices.get(call_id, 0)) if call_id else 0
+        out.append(
             _encode_json(
                 {
                     "type": "response.function_call_arguments.delta",
                     "sequence_number": self._next_seq(),
-                    "output_index": 1,
+                    "output_index": out_index,
                     "item_id": item_id,
                     "delta": delta,
                 }
                 ,
                 event="response.function_call_arguments.delta",
             )
-        ]
+        )
+        return out
 
     def on_final(self, meta: Dict[str, Any]) -> List[bytes]:
         finish_reason = meta.get("finish_reason") or "stop"
         status = {"stop": "completed", "length": "incomplete", "error": "failed"}.get(finish_reason, "completed")
         resp = self._response_stub(status=status)
 
-        output: List[dict] = []
-        # Emit tool calls as output items (best-effort).
-        for call_id, entry in self._tool_calls.items():
-            output.append(
-                {
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": entry.get("name") or "",
-                    "arguments": entry.get("arguments") or "",
-                    "id": self._tool_item_ids.get(call_id),
-                    "status": "completed",
-                }
-            )
-
+        outs: List[bytes] = []
         full_text = "".join(self._text_buf)
-        output.append(
-            {
+
+        # Build final output list in exact output_index order.
+        final_by_index: Dict[int, dict] = {}
+        for call_id, entry in self._tool_calls.items():
+            out_index = int(self._tool_output_indices.get(call_id, 0))
+            final_by_index[out_index] = {
+                "type": "function_call",
+                "call_id": call_id,
+                "name": entry.get("name") or "",
+                "arguments": entry.get("arguments") or "",
+                "id": self._tool_item_ids.get(call_id),
+                "status": "completed",
+            }
+
+        if self._msg_output_index is not None:
+            final_by_index[int(self._msg_output_index)] = {
                 "type": "message",
                 "role": "assistant",
                 "id": self._msg_item_id,
                 "status": "completed",
                 "content": [{"type": "output_text", "text": full_text, "annotations": []}],
             }
-        )
-        resp["output"] = output
+        elif full_text:
+            # Shouldn't normally happen (text deltas would have started the message),
+            # but keep things consistent if callers only set buffers.
+            outs.extend(self._ensure_message_started())
+            final_by_index[int(self._msg_output_index or 0)] = {
+                "type": "message",
+                "role": "assistant",
+                "id": self._msg_item_id,
+                "status": "completed",
+                "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+            }
+
+        resp["output"] = [final_by_index[i] for i in sorted(final_by_index.keys())]
+
+        # Emit *.done events for stricter aggregators (Codex, etc.).
+        # Tool calls: arguments.done -> output_item.done
+        for call_id in sorted(self._tool_calls.keys(), key=lambda cid: int(self._tool_output_indices.get(cid, 0))):
+            entry = self._tool_calls.get(call_id) or {}
+            item_id = self._tool_item_ids.get(call_id) or ""
+            out_index = int(self._tool_output_indices.get(call_id, 0))
+            outs.append(
+                _encode_json(
+                    {
+                        "type": "response.function_call_arguments.done",
+                        "sequence_number": self._next_seq(),
+                        "output_index": out_index,
+                        "item_id": item_id,
+                        "name": entry.get("name") or "",
+                        "arguments": entry.get("arguments") or "",
+                    },
+                    event="response.function_call_arguments.done",
+                )
+            )
+            outs.append(
+                _encode_json(
+                    {
+                        "type": "response.output_item.done",
+                        "sequence_number": self._next_seq(),
+                        "output_index": out_index,
+                        "item": final_by_index.get(out_index),
+                    },
+                    event="response.output_item.done",
+                )
+            )
+
+        # Message: output_text.done -> content_part.done -> output_item.done
+        if self._msg_output_index is not None:
+            out_index = int(self._msg_output_index)
+            outs.append(
+                _encode_json(
+                    {
+                        "type": "response.output_text.done",
+                        "sequence_number": self._next_seq(),
+                        "output_index": out_index,
+                        "item_id": self._msg_item_id,
+                        "content_index": self._msg_content_index,
+                        "text": full_text,
+                    },
+                    event="response.output_text.done",
+                )
+            )
+            outs.append(
+                _encode_json(
+                    {
+                        "type": "response.content_part.done",
+                        "sequence_number": self._next_seq(),
+                        "output_index": out_index,
+                        "item_id": self._msg_item_id,
+                        "content_index": self._msg_content_index,
+                        "part": {"type": "output_text", "text": full_text, "annotations": []},
+                    },
+                    event="response.content_part.done",
+                )
+            )
+            outs.append(
+                _encode_json(
+                    {
+                        "type": "response.output_item.done",
+                        "sequence_number": self._next_seq(),
+                        "output_index": out_index,
+                        "item": final_by_index.get(out_index),
+                    },
+                    event="response.output_item.done",
+                )
+            )
 
         usage = meta.get("usage")
         if usage and isinstance(usage, dict):
@@ -391,7 +510,8 @@ class _ResponsesSink(_InternalStreamSink):
                 "total_tokens": int(total_tokens or 0),
             }
 
-        return [_encode_json({"type": "response.completed", "sequence_number": self._next_seq(), "response": resp}, event="response.completed")]
+        outs.append(_encode_json({"type": "response.completed", "sequence_number": self._next_seq(), "response": resp}, event="response.completed"))
+        return outs
 
     def on_done(self) -> List[bytes]:
         return [_encode_sse("[DONE]")]
