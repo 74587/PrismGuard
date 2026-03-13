@@ -255,13 +255,61 @@ def to_claude_chat(req: InternalChatRequest) -> Dict[str, Any]:
     """
     内部格式 -> Claude Chat 格式（支持工具调用）
     """
+    def _normalize_input_schema(schema: Any) -> dict:
+        if not isinstance(schema, dict) or not schema:
+            return {"type": "object", "properties": {}}
+        # Claude expects an object schema for tool input.
+        if schema.get("type") is None:
+            schema = dict(schema)
+            schema["type"] = "object"
+        if schema.get("type") != "object":
+            # Best-effort: keep it valid-ish for Claude tools.
+            schema = dict(schema)
+            schema["type"] = "object"
+        if "properties" not in schema or not isinstance(schema.get("properties"), dict):
+            schema = dict(schema)
+            schema["properties"] = {}
+        if "required" in schema and not isinstance(schema.get("required"), list):
+            schema = dict(schema)
+            schema.pop("required", None)
+        return schema
+
+    def _normalize_tool_choice(tc: Any) -> Any:
+        # Claude Messages tool_choice:
+        # - {"type":"auto"} | {"type":"any"} | {"type":"tool","name":"..."}
+        # OpenAI Chat tool_choice:
+        # - "auto" | "none" | "required" | {"type":"function","function":{"name":"..."}}
+        if tc is None:
+            return None
+        if isinstance(tc, str):
+            if tc == "auto":
+                return {"type": "auto"}
+            if tc == "required":
+                return {"type": "any"}
+            if tc == "none":
+                return {"type": "auto"}
+            return {"type": tc}
+        if isinstance(tc, dict):
+            t = tc.get("type")
+            if t == "function":
+                fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                name = tc.get("name") or (fn.get("name") if isinstance(fn, dict) else None)
+                if name:
+                    return {"type": "tool", "name": name}
+                return {"type": "any"}
+            if t == "tool" and tc.get("name"):
+                return {"type": "tool", "name": tc.get("name")}
+            if t in {"auto", "any"}:
+                return {"type": t}
+        return tc
+
     # 转换工具定义
     tools = []
     for t in req.tools:
         tools.append({
             "name": t.name,
             "description": t.description,
-            "input_schema": t.input_schema
+            "input_schema": _normalize_input_schema(t.input_schema)
         })
     
     # 分离 system 和其他消息
@@ -323,7 +371,7 @@ def to_claude_chat(req: InternalChatRequest) -> Dict[str, Any]:
     if tools:
         body["tools"] = tools
     if req.tool_choice is not None:
-        body["tool_choice"] = req.tool_choice
+        body["tool_choice"] = _normalize_tool_choice(req.tool_choice)
     
     body.update(req.extra)
     
