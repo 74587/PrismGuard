@@ -46,9 +46,9 @@ async def startup_event():
     
     print("[INFO] PrismGuard 启动")
 
-    # 执行环境依赖检查
+    # 启动期只执行轻量依赖检查，避免导入 numpy/fasttext 增加常驻内存。
     try:
-        check_dependencies()
+        check_dependencies(deep_check=False)
     except DependencyError as e:
         print(f"\n{'='*60}", file=sys.stderr)
         print(f"[FATAL] 环境依赖检查失败，应用无法启动。", file=sys.stderr)

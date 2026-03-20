@@ -12,30 +12,52 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
-
-import joblib
-import numpy as np
-
-from sklearn.feature_extraction.text import HashingVectorizer
-from sklearn.linear_model import SGDClassifier
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 from ai_proxy.moderation.smart.profile import ModerationProfile, SampleLoadingStrategy
 from ai_proxy.moderation.smart.storage import SampleStorage
 from ai_proxy.utils.memory_guard import release_memory
+from tools.hashlinear_light_runtime import HashlinearRuntime, RUNTIME_VERSION
 
 
 @dataclass(frozen=True)
 class _HashLinearBundle:
-    clf: SGDClassifier
+    clf: Any
     cfg: dict
     mtime: float
 
 
 _model_cache: Dict[str, _HashLinearBundle] = {}
+_runtime_cache: Dict[str, Tuple[HashlinearRuntime, tuple[float, int, float, int]]] = {}
 
 
-def _vectorizer_from_cfg(cfg: dict) -> HashingVectorizer:
+def _import_joblib():
+    import joblib
+
+    return joblib
+
+
+def _import_numpy():
+    import numpy as np
+
+    return np
+
+
+def _import_hashing_vectorizer():
+    from sklearn.feature_extraction.text import HashingVectorizer
+
+    return HashingVectorizer
+
+
+def _import_sgd_classifier():
+    from sklearn.linear_model import SGDClassifier
+
+    return SGDClassifier
+
+
+def _vectorizer_from_cfg(cfg: dict):
+    HashingVectorizer = _import_hashing_vectorizer()
     analyzer = cfg.get("analyzer", "char")
     ngram_range = tuple(cfg.get("ngram_range", [2, 4]))
     n_features = int(cfg.get("n_features", 1_048_576))
@@ -56,6 +78,25 @@ def _model_path(profile: ModerationProfile) -> str:
     return profile.get_hashlinear_model_path()
 
 
+def _runtime_prefix(profile: ModerationProfile) -> Path:
+    return Path(profile.base_dir) / "hashlinear_runtime"
+
+
+def _runtime_paths(profile: ModerationProfile) -> tuple[Path, Path]:
+    prefix = _runtime_prefix(profile)
+    return prefix.with_suffix(".json"), prefix.with_suffix(".coef.f32")
+
+
+def _runtime_signature(profile: ModerationProfile) -> tuple[float, int, float, int]:
+    meta_path, coef_path = _runtime_paths(profile)
+    return (
+        meta_path.stat().st_mtime,
+        meta_path.stat().st_size,
+        coef_path.stat().st_mtime,
+        coef_path.stat().st_size,
+    )
+
+
 def hashlinear_model_exists(profile: ModerationProfile) -> bool:
     return os.path.exists(_model_path(profile))
 
@@ -69,7 +110,7 @@ def _remove_corrupted_model(path: str) -> None:
         print(f"[WARNING] 无法删除损坏的 HashLinear 模型文件: {path}, 错误: {e}")
 
 
-def _load_hashlinear_with_cache(profile: ModerationProfile) -> Tuple[SGDClassifier, dict]:
+def _load_hashlinear_with_cache(profile: ModerationProfile) -> Tuple[Any, dict]:
     profile_name = profile.profile_name
     path = _model_path(profile)
 
@@ -91,6 +132,7 @@ def _load_hashlinear_with_cache(profile: ModerationProfile) -> Tuple[SGDClassifi
         release_memory()
 
     try:
+        joblib = _import_joblib()
         payload = joblib.load(path)
         clf = payload["clf"]
         cfg = payload["cfg"]
@@ -109,6 +151,43 @@ def _load_hashlinear_with_cache(profile: ModerationProfile) -> Tuple[SGDClassifi
 
     _model_cache[profile_name] = _HashLinearBundle(clf=clf, cfg=cfg, mtime=mtime)
     return clf, cfg
+
+
+def _load_runtime_with_cache(profile: ModerationProfile) -> Optional[HashlinearRuntime]:
+    profile_name = profile.profile_name
+    meta_path, coef_path = _runtime_paths(profile)
+    if not meta_path.exists() or not coef_path.exists():
+        return None
+
+    signature = _runtime_signature(profile)
+    cached = _runtime_cache.get(profile_name)
+    if cached is not None and cached[1] == signature:
+        return cached[0]
+
+    prefix = _runtime_prefix(profile)
+    runtime = HashlinearRuntime.load(prefix)
+    if int(runtime.metadata.get("runtime_version", 0)) != RUNTIME_VERSION:
+        raise RuntimeError(
+            f"HashLinear runtime version mismatch: {runtime.metadata.get('runtime_version')} != {RUNTIME_VERSION}"
+        )
+    if runtime.metadata.get("classes") != [0, 1]:
+        raise RuntimeError(f"Unsupported HashLinear runtime classes: {runtime.metadata.get('classes')}")
+
+    _runtime_cache[profile_name] = (runtime, signature)
+    return runtime
+
+
+def _predict_with_runtime(text: str, profile: ModerationProfile) -> Optional[float]:
+    try:
+        runtime = _load_runtime_with_cache(profile)
+        if runtime is None:
+            return None
+        clean = text.replace("\r", " ").replace("\n", " ")
+        clean = _maybe_tokenize_for_word_analyzer(clean, runtime.cfg)
+        return float(runtime.predict_proba(clean))
+    except Exception as e:
+        print(f"[HashLinear] 轻量 runtime 不可用，回退 sklearn: {e}")
+        return None
 
 
 def _maybe_tokenize_for_word_analyzer(text: str, cfg: dict) -> str:
@@ -166,6 +245,9 @@ def train_hashlinear_model(profile: ModerationProfile) -> None:
     print(f"[HashLinear] 训练: epochs={cfg['epochs']} batch_size={cfg['batch_size']} alpha={cfg['alpha']}")
 
     vectorizer = _vectorizer_from_cfg(cfg)
+
+    SGDClassifier = _import_sgd_classifier()
+    np = _import_numpy()
 
     clf = SGDClassifier(
         loss="log_loss",
@@ -233,6 +315,7 @@ def train_hashlinear_model(profile: ModerationProfile) -> None:
     temp_path = model_path + ".tmp"
     payload = {"clf": clf, "cfg": cfg, "trained_at": int(time.time())}
 
+    joblib = _import_joblib()
     joblib.dump(payload, temp_path, compress=3)
 
     if not os.path.exists(temp_path) or os.path.getsize(temp_path) < 512:
@@ -246,11 +329,24 @@ def train_hashlinear_model(profile: ModerationProfile) -> None:
     os.replace(temp_path, model_path)
     print(f"[HashLinear] 模型已保存: {model_path} ({os.path.getsize(model_path)/1024/1024:.2f} MB)")
 
+    try:
+        from tools.export_hashlinear_runtime import export_model
+
+        export_model(Path(model_path), _runtime_prefix(profile))
+        meta_path, coef_path = _runtime_paths(profile)
+        print(f"[HashLinear] 轻量 runtime 已导出: {meta_path} | {coef_path}")
+    except Exception as e:
+        print(f"[HashLinear] 轻量 runtime 导出失败，保留 sklearn 回退路径: {e}")
+
 
 def hashlinear_predict_proba(text: str, profile: ModerationProfile) -> float:
     """
     预测违规概率 p(violation)。
     """
+    runtime_proba = _predict_with_runtime(text, profile)
+    if runtime_proba is not None:
+        return runtime_proba
+
     clf, cfg = _load_hashlinear_with_cache(profile)
 
     clean = text.replace("\r", " ").replace("\n", " ")
