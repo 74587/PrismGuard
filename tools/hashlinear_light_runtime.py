@@ -8,12 +8,20 @@ import re
 from pathlib import Path
 from typing import Iterable
 
+try:
+    import mmh3
+except ImportError:
+    mmh3 = None
+
 
 RUNTIME_VERSION = 1
 _WHITE_SPACES = re.compile(r"\s\s+")
 
 
 def murmurhash3_x86_32(data: bytes, seed: int = 0) -> int:
+    if mmh3 is not None:
+        return int(mmh3.hash_from_buffer(data, seed=seed, signed=True))
+
     c1 = 0xCC9E2D51
     c2 = 0x1B873593
     length = len(data)
