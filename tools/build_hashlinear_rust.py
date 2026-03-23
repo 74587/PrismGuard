@@ -52,8 +52,6 @@ def main() -> int:
             "--release",
             "--manifest-path",
             str(RUST_DIR / "Cargo.toml"),
-            "--python",
-            sys.executable,
         ],
         cwd=ROOT,
     )
