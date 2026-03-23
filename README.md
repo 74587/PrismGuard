@@ -491,6 +491,22 @@ python tools/test_bow_model.py default "测试文本"
 python tools/test_fasttext_model.py default "测试文本"
 ```
 
+### 4) 构建 HashLinear Rust 可选加速扩展
+
+`tools/hashlinear_light_runtime.py` 默认会优先尝试导入 `hashlinear_rust_ext`，导入失败、运行异常或未构建扩展时会自动回退到现有 Python 实现，不会影响服务启动。
+
+```bash
+# 在当前 Python 环境中构建并安装本地扩展
+python tools/build_hashlinear_rust.py
+```
+
+说明：
+
+- 该脚本依赖本机已有 `cargo`、`rustc`、`maturin`
+- 若缺少 Rust 工具链，脚本会明确报错退出，服务仍可继续走 Python fallback
+- 可通过环境变量 `HASHLINEAR_USE_RUST=0` 显式禁用 Rust 加速
+- 可通过 `HASHLINEAR_USE_RUST=1` 强制尝试加载；若扩展不存在或导入失败，仍会告警后回退
+
 ---
 
 ## FAQ / Troubleshooting
