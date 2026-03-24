@@ -288,6 +288,9 @@ PROXY_CONFIG_GEMINI={"basic_moderation":{"enabled":true},"smart_moderation":{"en
 ```
 
 - `profile`：对应 `configs/mod_profiles/{profile}`
+- Profile 内的 `ai.model` 支持填写逗号分隔的多个模型，例如 `gpt-4o-mini, gpt-4.1-mini`
+- Profile 内的 `ai.timeout` 表示 LLM 单次调用超时时间（秒），可选，默认 `10`
+- Profile 内的 `ai.max_retries` 表示最大重试次数，可选，默认 `2`
 
 #### `format_transform`
 
@@ -381,6 +384,22 @@ PROXY_CONFIG_GEMINI={"basic_moderation":{"enabled":true},"smart_moderation":{"en
 > 说明：训练与预测会根据上述开关自动选择对应实现（参见 [`train_local_model()`](ai_proxy/moderation/smart/scheduler.py:42) 与 [`local_model_predict_proba()`](ai_proxy/moderation/smart/ai.py:20)）。
 
 > 注意：若使用 fastText，建议遵循项目的依赖检查提示（例如 `numpy<2.0`）。
+
+AI 审核配置片段示例：
+
+```json
+{
+  "ai": {
+    "model": "gpt-4o-mini, gpt-4.1-mini",
+    "timeout": 10,
+    "max_retries": 2
+  }
+}
+```
+
+- 当 `model` 配置多个模型时，审核会在每次尝试时随机选择一个模型调用
+- 当一次调用超时或报错时，会在 `max_retries` 范围内继续重试
+- 上述字段缺省时会自动使用默认值，不会因为旧配置缺字段而报错
 
 ---
 

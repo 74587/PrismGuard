@@ -8,7 +8,7 @@ import hashlib
 import asyncio
 import threading
 from collections import OrderedDict
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, List
 from pydantic import BaseModel
 from openai import AsyncOpenAI
 
@@ -105,8 +105,8 @@ def get_or_create_openai_client(profile: ModerationProfile) -> AsyncOpenAI:
     if not api_key:
         raise ValueError(f"Environment variable {profile.config.ai.api_key_env} not set")
     
-    # 使用 base_url 和 api_key 作为缓存键
-    cache_key = f"{profile.config.ai.base_url}:{api_key[:10]}"
+    # timeout 也纳入缓存键，避免不同 profile 共用同一 client 时复用到错误超时配置
+    cache_key = f"{profile.config.ai.base_url}:{profile.config.ai.timeout}:{api_key[:10]}"
     
     with _client_lock:
         if cache_key not in _openai_clients:
@@ -117,6 +117,13 @@ def get_or_create_openai_client(profile: ModerationProfile) -> AsyncOpenAI:
             )
     
     return _openai_clients[cache_key]
+
+
+def _pick_model_for_attempt(models: List[str], attempted_models: List[str]) -> str:
+    """优先从未尝试过的模型中随机选择；全部尝试过后允许重复随机。"""
+    remaining = [model for model in models if model not in attempted_models]
+    pool = remaining or models
+    return random.choice(pool)
 
 
 async def cleanup_openai_clients():
@@ -221,13 +228,46 @@ async def ai_moderate(text: str, profile: ModerationProfile) -> ModerationResult
         
         client = get_or_create_openai_client(profile)
         prompt = profile.render_prompt(text)
-        
-        response = await client.chat.completions.create(
-            model=profile.config.ai.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
-        )
-        
+        models = profile.config.ai.get_model_candidates()
+        if not models:
+            raise ValueError("AI config model is empty")
+
+        timeout_s = max(float(profile.config.ai.timeout), 0.1)
+        max_retries = max(int(profile.config.ai.max_retries), 0)
+        total_attempts = max_retries + 1
+        attempted_models: List[str] = []
+        last_error: Optional[Exception] = None
+
+        print(f"  候选模型: {', '.join(models)}")
+        print(f"  单次超时: {timeout_s:.1f}s, 最大重试: {max_retries}")
+
+        response = None
+        selected_model = None
+        for attempt in range(1, total_attempts + 1):
+            selected_model = _pick_model_for_attempt(models, attempted_models)
+            attempted_models.append(selected_model)
+            try:
+                print(f"[MODERATION] AI审核尝试 {attempt}/{total_attempts}: model={selected_model}")
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=selected_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0,
+                        timeout=timeout_s,
+                    ),
+                    timeout=timeout_s,
+                )
+                break
+            except asyncio.TimeoutError as e:
+                last_error = e
+                print(f"[WARNING] AI审核超时: model={selected_model}, timeout={timeout_s:.1f}s")
+            except Exception as e:
+                last_error = e
+                print(f"[WARNING] AI审核调用失败: model={selected_model}, error={type(e).__name__}: {e}")
+
+            if attempt >= total_attempts:
+                raise last_error if last_error is not None else RuntimeError("AI moderation failed without response")
+
         content = response.choices[0].message.content
         
         # 智能提取 JSON：删除第一个 { 前和最后一个 } 后的内容
@@ -251,6 +291,7 @@ async def ai_moderate(text: str, profile: ModerationProfile) -> ModerationResult
             source="ai"
         )
         print(f"[MODERATION] AI审核结果: {'❌ 违规' if result.violation else '✅ 通过'}")
+        print(f"  使用模型: {selected_model}")
         if result.category:
             print(f"  类别: {result.category}")
         if result.reason:

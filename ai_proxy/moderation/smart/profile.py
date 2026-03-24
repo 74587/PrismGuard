@@ -15,6 +15,12 @@ class AIConfig(BaseModel):
     model: str = "gpt-4o-mini"
     api_key_env: str = "MOD_AI_API_KEY"
     timeout: int = 10
+    max_retries: int = 2
+
+    def get_model_candidates(self) -> List[str]:
+        """解析 model 字段中的逗号分隔模型列表"""
+        candidates = [item.strip() for item in self.model.split(",")]
+        return [item for item in candidates if item]
 
 
 class PromptConfig(BaseModel):
