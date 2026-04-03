@@ -86,9 +86,7 @@ impl SampleStorage {
     pub fn first_samples(&self, limit: usize) -> Vec<SampleRecord> {
         let mut out = Vec::new();
         for entry in self.db.iterator(IteratorMode::Start) {
-            let Ok((key, value)) = entry else {
-                continue;
-            };
+            let (key, value) = entry;
             let key = String::from_utf8_lossy(&key).to_string();
             if !key.starts_with("sample:") {
                 continue;
@@ -139,9 +137,7 @@ impl SampleStorage {
     fn raw_keys(&self, limit: usize) -> Vec<String> {
         let mut out = Vec::new();
         for entry in self.db.iterator(IteratorMode::Start) {
-            let Ok((key, _)) = entry else {
-                continue;
-            };
+            let (key, _) = entry;
             out.push(decode_rocksdict_string_lossy(&key));
             if out.len() >= limit {
                 break;
