@@ -35,7 +35,7 @@ impl SampleStorage {
         let rocks_path = rocks_path.as_ref().to_path_buf();
         let mut options = Options::default();
         options.create_if_missing(false);
-        options.set_comparator("rocksdict", Box::new(bytewise_compare));
+        options.set_comparator("rocksdict", bytewise_compare);
         let column_families = DBWithThreadMode::<MultiThreaded>::list_cf(&options, &rocks_path)
             .unwrap_or_else(|_| vec!["default".to_string()]);
         let db = if column_families.is_empty() || column_families == ["default"] {

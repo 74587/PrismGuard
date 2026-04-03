@@ -1,0 +1,7 @@
+.git
+.github
+target
+artifacts
+docs
+.env
+.env.*

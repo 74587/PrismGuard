@@ -1,12 +1,11 @@
-use std::io::{self, Read};
+use std::io::Read;
 
 use anyhow::Context;
-use axum::body::{boxed, BoxBody, Body, StreamBody};
+use axum::body::{boxed, BoxBody, Body};
 use axum::extract::{Path, State};
 use axum::http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, HOST};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::response::Response;
-use futures_util::TryStreamExt;
 use hyper::body::to_bytes;
 use serde_json::Value;
 
@@ -348,10 +347,6 @@ fn is_stream_response(headers: &reqwest::header::HeaderMap) -> bool {
         .and_then(|value| value.to_str().ok())
         .map(|value| value.starts_with("text/event-stream"))
         .unwrap_or(false)
-}
-
-fn map_stream_error(error: reqwest::Error) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, error)
 }
 
 fn detect_source_format(path: &str, body: Option<&Value>) -> Option<&'static str> {
