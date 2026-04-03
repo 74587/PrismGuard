@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::cmp::Ordering;
 
 use anyhow::{Context, Result};
-use rocksdb::{DBWithThreadMode, IteratorMode, MultiThreaded, Options};
+use rocksdb::{DB, IteratorMode, Options};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -25,7 +25,7 @@ pub struct SampleRecord {
 }
 
 pub struct SampleStorage {
-    db: DBWithThreadMode<MultiThreaded>,
+    db: DB,
     rocks_path: PathBuf,
     column_families: Vec<String>,
 }
@@ -36,17 +36,13 @@ impl SampleStorage {
         let mut options = Options::default();
         options.create_if_missing(false);
         options.set_comparator("rocksdict", bytewise_compare);
-        let column_families = DBWithThreadMode::<MultiThreaded>::list_cf(&options, &rocks_path)
+        let column_families = DB::list_cf(&options, &rocks_path)
             .unwrap_or_else(|_| vec!["default".to_string()]);
         let db = if column_families.is_empty() || column_families == ["default"] {
-            DBWithThreadMode::<MultiThreaded>::open_for_read_only(&options, &rocks_path, false)
+            DB::open(&options, &rocks_path)
         } else {
-            DBWithThreadMode::<MultiThreaded>::open_cf_for_read_only(
-                &options,
-                &rocks_path,
-                column_families.iter(),
-                false,
-            )
+            let cf_names = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+            DB::open_cf(&options, &rocks_path, &cf_names)
         }
         .with_context(|| format!("failed to open RocksDB {}", rocks_path.display()))?;
 
