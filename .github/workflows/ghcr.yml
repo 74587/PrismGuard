@@ -17,7 +17,7 @@ env:
 
 jobs:
   build-and-publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -32,6 +32,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89.0
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
