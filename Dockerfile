@@ -10,6 +10,7 @@ ENV ROCKSDB_LIB_DIR=/usr/lib/x86_64-linux-gnu
 ENV ROCKSDB_INCLUDE_DIR=/usr/include
 
 COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
 COPY src ./src
 
 # 必须保持 -j 1，只允许单核编译。
